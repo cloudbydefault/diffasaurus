@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffasaurus"
+version = "0.1.0"
+description = "A slightly prehistoric Microsoft 365 tenant history explorer powered by CSV snapshots."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6==6.11.0",
+]
+
+[project.scripts]
+diffasaurus = "diffasaurus.ui.main_window:main"
+
+[tool.setuptools.packages.find]
+include = ["diffasaurus*"]

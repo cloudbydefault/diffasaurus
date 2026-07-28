@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+build/
+dist/
+config/settings.json
+reports/*.csv
+!reports/.gitkeep
+pwsh/*
+!pwsh/.gitkeep
+psmodules/*
+!psmodules/.gitkeep
