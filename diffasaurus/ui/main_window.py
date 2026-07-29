@@ -49,6 +49,7 @@ from diffasaurus.core.settings import get_active_reports_dir
 from diffasaurus.ui.report_runner import RunScriptsDialog
 from diffasaurus.ui.source_settings import ReportSourceSettingsDialog
 from diffasaurus.ui.charts import ChangeBars, LineChart
+from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
 
 
 COLORS = {
@@ -228,7 +229,13 @@ class DiffasaurusWindow(QMainWindow):
         side.addSpacing(24)
 
         self.nav_buttons = []
-        for label in ("◈   Dig site", "▦   Run health", "▤   Fossil library", "⇄   Compare snapshots"):
+        for label in (
+            "◈   Dig site",
+            "▦   Run health",
+            "▤   Fossil library",
+            "⇄   Compare snapshots",
+            "▥   Explore snapshots",
+        ):
             button = QPushButton(label)
             button.setCheckable(True)
             button.setObjectName("navButton")
@@ -301,6 +308,8 @@ class DiffasaurusWindow(QMainWindow):
         self.stack.addWidget(self._build_run_health())
         self.stack.addWidget(self._build_library())
         self.stack.addWidget(self._build_compare())
+        self.snapshot_explorer = SnapshotExplorer()
+        self.stack.addWidget(self.snapshot_explorer)
         outer.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
 
@@ -615,6 +624,7 @@ class DiffasaurusWindow(QMainWindow):
         self.range_combo.currentIndexChanged.connect(self.metric_changed)
         self.aggregation_combo.currentIndexChanged.connect(self.metric_changed)
         self.library_search.textChanged.connect(self.filter_library)
+        self.library_table.cellDoubleClicked.connect(self.open_library_snapshot)
         self.baseline_combo.currentIndexChanged.connect(self.snapshot_selection_changed)
         self.latest_combo.currentIndexChanged.connect(self.snapshot_selection_changed)
         self.compare_button.clicked.connect(self.run_comparison)
@@ -629,9 +639,15 @@ class DiffasaurusWindow(QMainWindow):
             ("Scheduled run health", "See which weekday collections produced evidence—and which outputs are missing."),
             ("Fossil library", "Browse the CSV snapshots buried in your tenant timeline."),
             ("Compare snapshots", "Explain exactly what appeared, disappeared, or changed."),
+            (
+                "Snapshot explorer",
+                "Inspect raw tenant data, combine filters, and open report-aware dashboards.",
+            ),
         )
         self.page_title.setText(titles[index][0])
         self.page_subtitle.setText(titles[index][1])
+        if index == 4:
+            self.snapshot_explorer.activate()
 
     def _run_background(
         self,
@@ -806,6 +822,9 @@ class DiffasaurusWindow(QMainWindow):
         if current_metric and current_metric != "Analyzing snapshots…":
             self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
+        self.snapshot_explorer.set_snapshots(snapshots)
+        if self.stack.currentIndex() == 4:
+            self.snapshot_explorer.activate()
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
         self._family_generation += 1
@@ -1001,8 +1020,18 @@ class DiffasaurusWindow(QMainWindow):
                 snapshot.path.name,
             )
             for column, value in enumerate(values):
-                self.library_table.setItem(row, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, snapshot)
+                self.library_table.setItem(row, column, item)
         self.filter_library()
+
+    def open_library_snapshot(self, row: int, _column: int):
+        item = self.library_table.item(row, 0)
+        snapshot = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not isinstance(snapshot, ReportSnapshot):
+            return
+        self.show_page(4)
+        self.snapshot_explorer.select_snapshot(snapshot)
 
     def filter_library(self):
         needle = self.library_search.text().strip().lower()
@@ -1242,6 +1271,15 @@ def diffasaurus_stylesheet() -> str:
             font-size: 10px;
             font-weight: 650;
         }}
+        QLabel#dashboardSection {{
+            background:#11202c;
+            border-left:4px solid {COLORS['blue']};
+            border-radius:7px;
+            padding:8px 11px;
+            margin-top:7px;
+            font-size:13px;
+            font-weight:750;
+        }}
         QPushButton {{
             background: #142330;
             color: {COLORS['text']};
@@ -1286,7 +1324,7 @@ def diffasaurus_stylesheet() -> str:
             selection-background-color: #23465a;
         }}
         QComboBox::drop-down {{ border: 0; width: 26px; }}
-        QTableWidget {{
+        QTableWidget, QTableView, QListWidget {{
             background: #0d1924;
             alternate-background-color: #101f2c;
             border: 1px solid {COLORS['border']};
@@ -1294,6 +1332,9 @@ def diffasaurus_stylesheet() -> str:
             selection-background-color: #23465a;
             selection-color: white;
         }}
+        QListWidget::item {{ padding:5px 7px; }}
+        QListWidget::item:hover {{ background:#162b39; }}
+        QTableView::item {{ padding:3px 7px; border:0; }}
         QHeaderView::section {{
             background: #142430;
             color: #9db0c0;
