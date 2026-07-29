@@ -21,10 +21,36 @@ database server, cloud service, or connection to the original Coco365 project.
 - **Fossil library** provides a searchable inventory of the snapshot database.
 - **Compare snapshots** exposes added, removed, changed, and stable records,
   with field-level before/after values and CSV export.
+- **Snapshot explorer** opens any dated CSV in a sortable table or an adaptive
+  dashboard, with smart search and combined multi-column filters.
 
 Run health deliberately reports output evidence. A missing CSV means that no
 successful output was observed; it does not attempt to infer the internal state
 of an external scheduler.
+
+## Snapshot explorer
+
+Choose a report family, open **Explore snapshots**, then select any dated CSV.
+CSV loading and dashboard calculation run in the background, so large local,
+OneDrive, and SharePoint-backed reports do not lock the window.
+You can also double-click a Fossil library entry to open that exact snapshot.
+
+The **Table** view provides:
+
+- sortable rows and columns with horizontal exploration of wide schemas;
+- debounced smart search across identity, device, group, and mailbox keys;
+- an all-columns search option;
+- an improved Excel-style **Multi-column filter** with searchable columns and
+  values, check/uncheck-visible actions, blank-value handling, and combined
+  conditions; and
+- a persistent visible-row count and clear-filter state.
+
+The **Dashboard** view recognizes identity, activity, authentication, group,
+group-membership, role, device, iOS, Autopilot, Intune app, access-package, and
+Exchange shared mailbox reports. Its cards are interactive: selecting a metric
+opens the table with the matching rows filtered. Unknown CSV schemas receive a
+generic data-quality dashboard covering row count, schema width, completeness,
+and blank fields.
 
 ## Run from source
 

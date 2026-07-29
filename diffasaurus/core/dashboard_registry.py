@@ -46,8 +46,18 @@ from diffasaurus.core.dashboard_builders.exchange_shared_mailboxes_builder impor
     looks_like_exchange_shared_mailboxes_report,
     build_exchange_shared_mailboxes_stats,
 )
+from diffasaurus.core.dashboard_builders.generic_builder import build_generic_stats
+from diffasaurus.core.dashboard_builders.memberships_builder import (
+    build_memberships_stats,
+    looks_like_memberships_report,
+)
 
 DASHBOARD_BUILDERS = [
+    {
+        "title": "Group Memberships Dashboard",
+        "detector": looks_like_memberships_report,
+        "builder": build_memberships_stats,
+    },
     {
         "title": "Role Assignments Dashboard",
         "detector": looks_like_role_assignments_report,
@@ -112,4 +122,4 @@ def get_dashboard_definition(model, headers):
         if result:
             return item["title"], item["builder"](model, headers)
 
-    return None, None
+    return "Snapshot Dashboard", build_generic_stats(model, headers)

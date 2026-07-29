@@ -4,6 +4,16 @@
 
 ### Added
 
+- A snapshot explorer with sortable table and adaptive dashboard views for
+  every dated CSV.
+- Background CSV loading and report-aware dashboards for identities, activity,
+  authentication, groups, group memberships, roles, devices, iOS, Autopilot,
+  Intune apps, access packages, and Exchange shared mailboxes.
+- A generic data-quality dashboard for report schemas without a specialized
+  builder.
+- Improved Excel-style multi-column filtering with lazy background value
+  scans, column/value search, blank handling, and combined filters.
+- Debounced smart search plus an all-columns search mode.
 - Separate background-scanned counts for Diffasaurus-isolated modules and
   modules installed in normal PowerShell user or machine locations.
 - An installed-module inventory with explicit, background copying of one or
