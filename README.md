@@ -45,6 +45,15 @@ Newly generated reports are stored in `reports/`. Use **Report source** inside
 the app to analyze another local, OneDrive, or SharePoint-synchronized folder
 without copying its CSV files.
 
+Large synchronized libraries are indexed lazily: Diffasaurus first reads only
+filenames and timestamps, then analyzes the selected report family on a
+background thread. The interface remains usable while OneDrive retrieves any
+online-only files, with live progress for indexing and analysis. Completed
+snapshot metrics and recent comparison counts are cached on disk and reused
+after restarting Diffasaurus; a CSV is analyzed again automatically when its
+size or modification time changes. For the fastest first analysis of a family,
+mark its CSV files as **Always keep on this device** in OneDrive.
+
 File names must end in a timestamp such as:
 
 ```text

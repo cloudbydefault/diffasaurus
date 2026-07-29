@@ -16,6 +16,10 @@ class CsvTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self._headers)
 
+    @property
+    def headers(self) -> tuple[str, ...]:
+        return tuple(self._headers)
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None

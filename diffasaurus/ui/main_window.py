@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QFontDatabase
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QTableWidget,
@@ -28,13 +30,16 @@ from PyQt6.QtWidgets import (
 from diffasaurus.core.report_history import (
     ComparisonSummary,
     ReportSnapshot,
+    analyze_snapshot,
     common_headers,
     compare_snapshots,
-    history_metrics,
+    recent_movement,
     report_run_health,
-    scan_report_history,
+    save_analysis_cache,
+    scan_report_index,
     suggested_key,
 )
+from diffasaurus.core.paths import project_root
 from diffasaurus.core.settings import get_active_reports_dir
 from diffasaurus.ui.report_runner import RunScriptsDialog
 from diffasaurus.ui.source_settings import ReportSourceSettingsDialog
@@ -53,6 +58,64 @@ COLORS = {
     "amber": "#f5b942",
     "blue": "#65a9ff",
 }
+DETAIL_TABLE_LIMIT = 2_000
+
+
+class WorkerSignals(QObject):
+    result = pyqtSignal(object)
+    error = pyqtSignal(str)
+    finished = pyqtSignal()
+    progress = pyqtSignal(int, int, str)
+
+
+class BackgroundTask(QRunnable):
+    def __init__(self, function, *args, with_progress: bool = False):
+        super().__init__()
+        self.function = function
+        self.args = args
+        self.with_progress = with_progress
+        self.signals = WorkerSignals()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            if self.with_progress:
+                result = self.function(*self.args, progress=self.signals.progress.emit)
+            else:
+                result = self.function(*self.args)
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+        else:
+            self.signals.result.emit(result)
+        finally:
+            self.signals.finished.emit()
+
+
+def analyze_family(
+    snapshots: list[ReportSnapshot],
+    cancelled: threading.Event,
+    progress=None,
+):
+    title = snapshots[0].family if snapshots else "Report history"
+    history = []
+    total = len(snapshots)
+    if progress:
+        progress(0, total, "Preparing snapshot analysis")
+    for index, snapshot in enumerate(snapshots, start=1):
+        if cancelled.is_set():
+            return None
+        hydrated, title, metrics = analyze_snapshot(snapshot)
+        history.append((hydrated, metrics))
+        if progress:
+            progress(index, total, snapshot.path.name)
+    if cancelled.is_set():
+        return None
+    if progress:
+        progress(total, total, "Comparing recent changes")
+    hydrated = [snapshot for snapshot, _metrics in history]
+    movement, latest_summary = recent_movement(hydrated, max_intervals=12)
+    save_analysis_cache()
+    return title, history, movement, latest_summary
 
 
 class MetricCard(QFrame):
@@ -91,12 +154,28 @@ class DiffasaurusWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Diffasaurus")
+        icon_path = application_icon_path()
+        if icon_path.is_file():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1440, 880)
         self.report_dir = get_active_reports_dir()
         self.families: dict[str, list[ReportSnapshot]] = {}
         self.current_history: list[tuple[ReportSnapshot, dict[str, float]]] = []
         self.current_comparison: ComparisonSummary | None = None
         self.current_filter = "All"
+        self.thread_pool = QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(2)
+        self._workers: set[BackgroundTask] = set()
+        self._index_generation = 0
+        self._family_generation = 0
+        self._comparison_generation = 0
+        self._pending_family = ""
+        self._preferred_metric = ""
+        self._family_cancelled = threading.Event()
+        self._family_timer = QTimer(self)
+        self._family_timer.setSingleShot(True)
+        self._family_timer.setInterval(250)
+        self._family_timer.timeout.connect(self._start_family_analysis)
         self._build_ui()
         self._wire()
         self.refresh_history()
@@ -176,6 +255,13 @@ class DiffasaurusWindow(QMainWindow):
         self.refresh_button.setObjectName("secondaryButton")
         top.addWidget(self.refresh_button)
         outer.addLayout(top)
+
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setObjectName("loadingBar")
+        self.loading_bar.setMinimumHeight(22)
+        self.loading_bar.setTextVisible(True)
+        self.loading_bar.hide()
+        outer.addWidget(self.loading_bar)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_overview())
@@ -346,6 +432,10 @@ class DiffasaurusWindow(QMainWindow):
         export.clicked.connect(self.export_visible_changes)
         filter_row.addWidget(export)
         layout.addLayout(filter_row)
+        self.diff_notice = QLabel("")
+        self.diff_notice.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
+        self.diff_notice.hide()
+        layout.addWidget(self.diff_notice)
         self.diff_table = self._table(("Change", "Identity", "Property", "Before", "After"))
         self.diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.diff_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -390,22 +480,99 @@ class DiffasaurusWindow(QMainWindow):
         self.page_title.setText(titles[index][0])
         self.page_subtitle.setText(titles[index][1])
 
+    def _run_background(
+        self,
+        function,
+        args,
+        on_result,
+        on_error,
+        on_progress=None,
+        with_progress: bool = False,
+    ):
+        worker = BackgroundTask(function, *args, with_progress=with_progress)
+        self._workers.add(worker)
+        worker.signals.result.connect(on_result)
+        worker.signals.error.connect(on_error)
+        if on_progress:
+            worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(lambda: self._workers.discard(worker))
+        self.thread_pool.start(worker)
+
+    def _show_progress(self, current: int, total: int, label: str):
+        self.loading_bar.show()
+        if total > 0:
+            self.loading_bar.setRange(0, total)
+            self.loading_bar.setValue(min(current, total))
+            percent = round((current / total) * 100)
+            self.loading_bar.setFormat(f"{percent}%  ·  {label}")
+        else:
+            self.loading_bar.setRange(0, 0)
+            self.loading_bar.setFormat(label)
+
+    def _hide_progress(self):
+        self.loading_bar.hide()
+        self.loading_bar.setRange(0, 1)
+        self.loading_bar.setValue(0)
+
+    def _update_source_badge(self, prefix: str = "●"):
+        source_name = "LOCAL DATABASE" if self.report_dir.name == "reports" else self.report_dir.name.upper()
+        self.source_badge.setText(
+            f"{prefix}  {source_name}  ·  {sum(map(len, self.families.values()))} CSV"
+        )
+
     def refresh_history(self):
         selected = self.family_combo.currentText()
         self.report_dir = get_active_reports_dir()
-        self.families = scan_report_history(self.report_dir)
-        source_name = "LOCAL DATABASE" if self.report_dir.name == "reports" else self.report_dir.name.upper()
-        self.source_badge.setText(
-            f"●  {source_name}  ·  {sum(map(len, self.families.values()))} CSV"
+        self._family_generation += 1
+        self._family_cancelled.set()
+        self._family_timer.stop()
+        self._comparison_generation += 1
+        self._index_generation += 1
+        generation = self._index_generation
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("Indexing…")
+        self.family_combo.setEnabled(False)
+        self.source_badge.setText("◌  INDEXING CSV FOSSILS…")
+        self._show_progress(0, 0, "Finding CSV snapshots…")
+        self._run_background(
+            scan_report_index,
+            (self.report_dir,),
+            lambda families: self._index_ready(generation, selected, families),
+            lambda message: self._index_failed(generation, message),
+            lambda current, total, label: (
+                self._show_progress(current, total, f"Indexing · {label}")
+                if generation == self._index_generation
+                else None
+            ),
+            with_progress=True,
         )
+
+    def _index_ready(self, generation: int, selected: str, families):
+        if generation != self._index_generation:
+            return
+        self.families = families
         self.family_combo.blockSignals(True)
         self.family_combo.clear()
         self.family_combo.addItems(self.families)
         if selected in self.families:
             self.family_combo.setCurrentText(selected)
         self.family_combo.blockSignals(False)
-        self.family_changed()
+        self.family_combo.setEnabled(True)
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("Refresh")
+        self._update_source_badge()
         self._refresh_run_health()
+        self.family_changed()
+
+    def _index_failed(self, generation: int, message: str):
+        if generation != self._index_generation:
+            return
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("Refresh")
+        self.family_combo.setEnabled(True)
+        self.source_badge.setText("×  INDEX FAILED")
+        self._hide_progress()
+        QMessageBox.warning(self, "Report indexing", message)
 
     def _refresh_run_health(self):
         health = report_run_health(self.families, business_day_count=10)
@@ -473,30 +640,99 @@ class DiffasaurusWindow(QMainWindow):
             )
 
     def family_changed(self):
+        current_metric = self.metric_combo.currentText()
+        if current_metric and current_metric != "Analyzing snapshots…":
+            self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
+        self._family_generation += 1
+        self._family_cancelled.set()
+        self._family_cancelled = threading.Event()
+        self._pending_family = self.family_combo.currentText()
+        self._family_timer.stop()
         if not snapshots:
             self.current_history = []
             self.line_chart.set_series([], [])
             self.change_bars.set_series([])
+            self._hide_progress()
             return
 
-        _title, self.current_history = history_metrics(snapshots)
+        self.metric_combo.blockSignals(True)
+        self.metric_combo.clear()
+        self.metric_combo.addItem("Analyzing snapshots…")
+        self.metric_combo.blockSignals(False)
+        self.metric_combo.setEnabled(False)
+        self.compare_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("Analyzing…")
+        self.card_current.set_data("…", "reading selected report family")
+        self.card_delta.set_data("…", "the window stays responsive")
+        self.card_changes.set_data("…", "checking the latest 12 intervals")
+        self.card_snapshots.set_data(str(len(snapshots)), "snapshots queued")
+        self._show_progress(0, len(snapshots), "Preparing snapshot analysis")
+        self._family_timer.start()
+
+    def _start_family_analysis(self):
+        family = self._pending_family
+        generation = self._family_generation
+        snapshots = self.families.get(family, [])
+        if not snapshots:
+            return
+        self._run_background(
+            analyze_family,
+            (snapshots, self._family_cancelled),
+            lambda payload: self._family_ready(generation, family, payload),
+            lambda message: self._family_failed(generation, family, message),
+            lambda current, total, label: (
+                self._show_progress(current, total, f"Analyzing · {label}")
+                if generation == self._family_generation
+                else None
+            ),
+            with_progress=True,
+        )
+
+    def _family_ready(self, generation: int, family: str, payload):
+        if generation != self._family_generation or family != self.family_combo.currentText():
+            return
+        if payload is None:
+            return
+        _title, self.current_history, movement, latest_summary = payload
+        snapshots = [snapshot for snapshot, _metrics in self.current_history]
+        self.families[family] = snapshots
+        self._populate_library(snapshots)
+        self._populate_snapshot_combos(snapshots)
         available = []
         for _snapshot, metrics in self.current_history:
             for metric in metrics:
                 if metric not in available:
                     available.append(metric)
-        previous = self.metric_combo.currentText()
+        previous = self._preferred_metric
         self.metric_combo.blockSignals(True)
         self.metric_combo.clear()
         self.metric_combo.addItems(available)
         if previous in available:
             self.metric_combo.setCurrentText(previous)
         self.metric_combo.blockSignals(False)
+        self.metric_combo.setEnabled(True)
+        self.compare_button.setEnabled(len(snapshots) > 1)
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("Refresh")
+        self._update_source_badge()
+        self._hide_progress()
         self.metric_changed()
-        self._update_movement(snapshots)
+        self._show_movement(movement, latest_summary)
+
+    def _family_failed(self, generation: int, family: str, message: str):
+        if generation != self._family_generation or family != self.family_combo.currentText():
+            return
+        self.metric_combo.clear()
+        self.metric_combo.addItem("Analysis unavailable")
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("Refresh")
+        self._update_source_badge("!")
+        self._hide_progress()
+        self.card_current.set_data("—", message)
 
     def metric_changed(self):
         metric = self.metric_combo.currentText()
@@ -514,28 +750,8 @@ class DiffasaurusWindow(QMainWindow):
         self.card_delta.set_data(delta_text, "versus previous snapshot")
         self.card_snapshots.set_data(str(len(self.current_history)), "CSV snapshots available")
 
-    def _update_movement(self, snapshots: list[ReportSnapshot]):
-        series = []
-        latest_summary = None
-        for baseline, latest in zip(snapshots[:-1], snapshots[1:]):
-            headers = common_headers(baseline, latest)
-            key = suggested_key(headers)
-            if not key:
-                continue
-            try:
-                summary = compare_snapshots(baseline, latest, key)
-            except Exception:
-                continue
-            latest_summary = summary
-            series.append(
-                (
-                    latest.captured_at.strftime("%d %b"),
-                    summary.added,
-                    summary.removed,
-                    summary.changed,
-                )
-            )
-        self.change_bars.set_series(series[-12:])
+    def _show_movement(self, series, latest_summary):
+        self.change_bars.set_series(series)
         if latest_summary:
             self.card_changes.set_data(
                 f"{latest_summary.total_changes:,}",
@@ -550,8 +766,8 @@ class DiffasaurusWindow(QMainWindow):
             values = (
                 snapshot.label,
                 snapshot.captured_at.strftime("%Y-%m-%d %H:%M"),
-                f"{snapshot.row_count:,}",
-                str(len(snapshot.headers)),
+                f"{snapshot.row_count:,}" if snapshot.row_count >= 0 else "On demand",
+                str(len(snapshot.headers)) if snapshot.headers else "On demand",
                 snapshot.path.name,
             )
             for column, value in enumerate(values):
@@ -598,13 +814,25 @@ class DiffasaurusWindow(QMainWindow):
         if baseline.path == latest.path:
             QMessageBox.information(self, "Compare snapshots", "Choose two different snapshots.")
             return
-        try:
-            self.current_comparison = compare_snapshots(baseline, latest, self.key_combo.currentText())
-        except Exception as exc:
-            QMessageBox.warning(self, "Compare snapshots", str(exc))
-            return
+        self._comparison_generation += 1
+        generation = self._comparison_generation
+        self.compare_button.setEnabled(False)
+        self.compare_button.setText("Comparing…")
+        self._show_progress(0, 0, "Comparing two CSV snapshots…")
+        self._run_background(
+            compare_snapshots,
+            (baseline, latest, self.key_combo.currentText()),
+            lambda summary: self._comparison_ready(generation, summary),
+            lambda message: self._comparison_failed(generation, message),
+        )
 
-        summary = self.current_comparison
+    def _comparison_ready(self, generation: int, summary: ComparisonSummary):
+        if generation != self._comparison_generation:
+            return
+        self.current_comparison = summary
+        self.compare_button.setEnabled(True)
+        self.compare_button.setText("Compare")
+        self._hide_progress()
         for title, value in (
             ("Added", summary.added),
             ("Removed", summary.removed),
@@ -612,9 +840,48 @@ class DiffasaurusWindow(QMainWindow):
             ("Stable", summary.stable),
         ):
             self.compare_cards[title].set_data(f"{value:,}", "rows")
-        self.diff_table.setRowCount(len(summary.details))
-        for row, detail in enumerate(summary.details):
-            values = (detail["change"], detail["key"], detail["column"], detail["before"], detail["after"])
+        self.set_change_filter("All")
+
+    def _comparison_failed(self, generation: int, message: str):
+        if generation != self._comparison_generation:
+            return
+        self.compare_button.setEnabled(True)
+        self.compare_button.setText("Compare")
+        self._hide_progress()
+        QMessageBox.warning(self, "Compare snapshots", message)
+
+    def set_change_filter(self, value: str):
+        self.current_filter = value
+        for button in self.filter_buttons:
+            button.setChecked(button.text() == value)
+        self.apply_change_filters()
+
+    def apply_change_filters(self):
+        if not self.current_comparison:
+            self.diff_table.setRowCount(0)
+            self.diff_notice.hide()
+            return
+        needle = self.change_search.text().strip().lower()
+        matching = []
+        has_more = False
+        for detail in self.current_comparison.details:
+            if not self._detail_matches(detail, needle):
+                continue
+            if len(matching) >= DETAIL_TABLE_LIMIT:
+                has_more = True
+                break
+            matching.append(detail)
+
+        self.diff_table.setUpdatesEnabled(False)
+        self.diff_table.setRowCount(len(matching))
+        for row, detail in enumerate(matching):
+            values = (
+                detail["change"],
+                detail["key"],
+                detail["column"],
+                detail["before"],
+                detail["after"],
+            )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:
@@ -627,28 +894,30 @@ class DiffasaurusWindow(QMainWindow):
                             }.get(value, COLORS["text"])
                         )
                     )
-                    item.setFont(QFont(item.font().family(), item.font().pointSize(), QFont.Weight.Bold))
+                    item.setFont(
+                        QFont(
+                            item.font().family(),
+                            item.font().pointSize(),
+                            QFont.Weight.Bold,
+                        )
+                    )
                 self.diff_table.setItem(row, column, item)
-        self.set_change_filter("All")
+        self.diff_table.setUpdatesEnabled(True)
+        if has_more:
+            self.diff_notice.setText(
+                f"Showing the first {DETAIL_TABLE_LIMIT:,} matching details for speed. "
+                "Refine the filter, or export to include every match."
+            )
+            self.diff_notice.show()
+        else:
+            self.diff_notice.hide()
 
-    def set_change_filter(self, value: str):
-        self.current_filter = value
-        for button in self.filter_buttons:
-            button.setChecked(button.text() == value)
-        self.apply_change_filters()
-
-    def apply_change_filters(self):
-        needle = self.change_search.text().strip().lower()
-        for row in range(self.diff_table.rowCount()):
-            change = self.diff_table.item(row, 0).text() if self.diff_table.item(row, 0) else ""
-            text = " ".join(
-                self.diff_table.item(row, column).text()
-                for column in range(self.diff_table.columnCount())
-                if self.diff_table.item(row, column)
-            ).lower()
-            hidden = self.current_filter != "All" and change != self.current_filter
-            hidden = hidden or (bool(needle) and needle not in text)
-            self.diff_table.setRowHidden(row, hidden)
+    def _detail_matches(self, detail: dict[str, str], needle: str) -> bool:
+        if self.current_filter != "All" and detail["change"] != self.current_filter:
+            return False
+        if not needle:
+            return True
+        return needle in " ".join(detail.values()).lower()
 
     def export_visible_changes(self):
         if not self.current_comparison:
@@ -667,12 +936,18 @@ class DiffasaurusWindow(QMainWindow):
         with open(path, "w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(("Change", "Identity", "Property", "Before", "After"))
-            for row in range(self.diff_table.rowCount()):
-                if self.diff_table.isRowHidden(row):
+            needle = self.change_search.text().strip().lower()
+            for detail in self.current_comparison.details:
+                if not self._detail_matches(detail, needle):
                     continue
                 writer.writerow(
-                    self.diff_table.item(row, column).text() if self.diff_table.item(row, column) else ""
-                    for column in range(self.diff_table.columnCount())
+                    (
+                        detail["change"],
+                        detail["key"],
+                        detail["column"],
+                        detail["before"],
+                        detail["after"],
+                    )
                 )
         QMessageBox.information(self, "Export", f"Changes exported to:\n{Path(path).name}")
 
@@ -816,11 +1091,18 @@ def preferred_ui_font() -> str:
     return QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
 
 
+def application_icon_path() -> Path:
+    return project_root() / "assets" / "diffasaurus-icon.png"
+
+
 def main():
     import sys
 
     app = QApplication(sys.argv)
     app.setApplicationName("Diffasaurus")
+    icon_path = application_icon_path()
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
     app.setStyle("Fusion")
     app.setFont(QFont(preferred_ui_font(), 11))
     app.setStyleSheet(diffasaurus_stylesheet())
