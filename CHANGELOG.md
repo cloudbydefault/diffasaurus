@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.0-preview.3
+
+This private preview turns every detected PowerShell version into an
+independent, testable environment.
+
+### Added
+
+- A private module directory and module-analysis cache for each PowerShell
+  executable, version, and architecture.
+- Per-runtime module inventory, arbitrary module/version installation, removal,
+  folder access, and a one-click report-module installation preset.
+- A persistent embedded PowerShell console that runs the exact selected
+  executable with its isolated module environment.
+- Private-module counts in the runtime manager and report generator.
+
+### Fixed
+
+- Portable runtime imports, removals, rescans, and version probes now run in
+  background workers instead of freezing the Qt interface.
+- Portable import selects the actual `pwsh` or `pwsh.exe` executable, removing
+  ambiguity around nested extracted folders.
+- Report generation no longer sees modules installed for another PowerShell
+  version or in the normal user/system module locations.
+- Runtime architecture now reports the PowerShell process architecture rather
+  than the operating-system architecture.
+
+### Migration note
+
+- Existing user-wide modules are intentionally not copied. Install the desired
+  report modules once in **Modules & console** for each runtime that should run
+  Diffasaurus reports.
+
+### Packaging notes
+
+- macOS and Windows packages remain preview builds without production signing
+  or notarization.
+
 ## 0.2.0-preview.2
 
 This private preview makes manual report recovery reliable on packaged macOS

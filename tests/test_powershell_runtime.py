@@ -101,7 +101,7 @@ class PowerShellRuntimeTests(unittest.TestCase):
                 ),
             ):
                 managed.mkdir()
-                runtime = import_portable_runtime(source)
+                runtime = import_portable_runtime(executable)
 
             self.assertNotEqual(runtime.path, executable)
             self.assertTrue(runtime.path.is_file())

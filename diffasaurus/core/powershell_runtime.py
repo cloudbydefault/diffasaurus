@@ -20,7 +20,7 @@ from diffasaurus.core.settings import (
 
 VERSION_SCRIPT = (
     "$PSVersionTable.PSVersion.ToString();"
-    "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()"
+    "[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()"
 )
 
 
@@ -251,19 +251,22 @@ def _is_managed_path(path: Path | None) -> bool:
         return False
 
 
-def find_portable_executable(folder: Path) -> Path | None:
-    direct = folder / _runtime_name()
+def find_portable_executable(location: Path) -> Path | None:
+    if location.is_file():
+        return location if location.name.lower() == _runtime_name().lower() else None
+    direct = location / _runtime_name()
     if direct.is_file():
         return direct
-    matches = sorted(folder.rglob(_runtime_name()), key=lambda path: len(path.parts))
+    matches = sorted(location.rglob(_runtime_name()), key=lambda path: len(path.parts))
     return matches[0] if matches else None
 
 
-def import_portable_runtime(folder: Path) -> PowerShellRuntime:
-    source = folder.expanduser().resolve()
-    executable = find_portable_executable(source)
+def import_portable_runtime(location: Path) -> PowerShellRuntime:
+    selected_location = location.expanduser().resolve()
+    executable = find_portable_executable(selected_location)
     if executable is None:
-        raise ValueError(f"No {_runtime_name()} executable was found in that folder.")
+        raise ValueError(f"No {_runtime_name()} executable was found at that location.")
+    source = executable.parent
     probed = probe_powershell_runtime(executable, "Portable", True)
     if probed is None:
         raise ValueError("The selected portable PowerShell runtime could not be started.")

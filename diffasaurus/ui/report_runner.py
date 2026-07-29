@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
-import os
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, QSize, Qt
+from PyQt6.QtCore import QProcess, QProcessEnvironment, QSize, QThreadPool, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -22,8 +21,12 @@ from PyQt6.QtWidgets import (
 
 from diffasaurus.core.paths import (
     list_report_scripts,
-    modules_dir,
     project_root,
+)
+from diffasaurus.core.powershell_environment import (
+    REPORT_COMMAND,
+    powershell_environment,
+    private_module_count,
 )
 from diffasaurus.core.powershell_runtime import (
     PowerShellRuntime,
@@ -33,6 +36,7 @@ from diffasaurus.core.powershell_runtime import (
 )
 from diffasaurus.core.report_history import expected_business_days, scan_report_index
 from diffasaurus.core.settings import get_active_reports_dir
+from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.powershell_manager import PowerShellManagerDialog
 
 
@@ -100,6 +104,8 @@ class RunScriptsDialog(QDialog):
         self.resize(920, 680)
         self.runtimes: list[PowerShellRuntime] = []
         self.pwsh_runtime: PowerShellRuntime | None = None
+        self._tasks: set[BackgroundCall] = set()
+        self._refresh_generation = 0
         self.report_dir = get_active_reports_dir()
         self.queue: list[Path] = []
         self.failures: list[Path] = []
@@ -223,11 +229,39 @@ class RunScriptsDialog(QDialog):
             else f"All scheduled reports present · output to {self.report_dir}"
         )
 
-    def refresh_runtimes(self, preferred: Path | None = None):
-        selected_path = preferred or (
+    def refresh_runtimes(self, preferred: Path | bool | None = None):
+        preferred_path = preferred if isinstance(preferred, Path) else None
+        selected_path = preferred_path or (
             self.pwsh_runtime.path if self.pwsh_runtime else None
         )
-        self.runtimes = discover_powershell_runtimes()
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self.runtime_status.setText("Scanning in background…")
+        self.runtime_combo.setEnabled(False)
+        self.rescan_runtime_button.setEnabled(False)
+        self.run.setEnabled(False)
+        task = BackgroundCall(discover_powershell_runtimes)
+        self._tasks.add(task)
+        task.signals.succeeded.connect(
+            lambda runtimes: self._runtimes_loaded(
+                list(runtimes),
+                selected_path,
+                generation,
+            )
+        )
+        task.signals.failed.connect(self._runtime_scan_failed)
+        task.signals.done.connect(lambda: self._tasks.discard(task))
+        QThreadPool.globalInstance().start(task)
+
+    def _runtimes_loaded(
+        self,
+        runtimes: list[PowerShellRuntime],
+        selected_path: Path | None,
+        generation: int,
+    ):
+        if generation != self._refresh_generation:
+            return
+        self.runtimes = runtimes
         active = selected_powershell_runtime(self.runtimes)
         self.runtime_combo.blockSignals(True)
         self.runtime_combo.clear()
@@ -248,7 +282,16 @@ class RunScriptsDialog(QDialog):
                 self.runtime_combo.setCurrentIndex(index)
                 break
         self.runtime_combo.blockSignals(False)
+        self.runtime_combo.setEnabled(True)
+        self.rescan_runtime_button.setEnabled(True)
+        self.run.setEnabled(True)
         self.runtime_changed()
+
+    def _runtime_scan_failed(self, message: str):
+        self.runtime_status.setText(f"Scan failed: {message}")
+        self.runtime_combo.setEnabled(True)
+        self.rescan_runtime_button.setEnabled(True)
+        self.run.setEnabled(True)
 
     def runtime_changed(self):
         runtime = self.runtime_combo.currentData()
@@ -256,7 +299,9 @@ class RunScriptsDialog(QDialog):
         if self.pwsh_runtime:
             select_powershell_runtime(self.pwsh_runtime)
             self.runtime_status.setText(
-                "Ready" if self.pwsh_runtime.supported else "PowerShell 7+ required"
+                f"Ready · {private_module_count(self.pwsh_runtime)} private modules"
+                if self.pwsh_runtime.supported
+                else "PowerShell 7+ required"
             )
         else:
             self.runtime_status.setText("No runtime detected")
@@ -296,6 +341,17 @@ class RunScriptsDialog(QDialog):
         if not selected:
             QMessageBox.information(self, "Generate reports", "Select at least one report.")
             return
+        if private_module_count(self.pwsh_runtime) == 0:
+            answer = QMessageBox.question(
+                self,
+                "Empty PowerShell environment",
+                f"PowerShell {self.pwsh_runtime.version} has no private modules yet.\n\n"
+                "System and other runtime modules are intentionally hidden, so reports "
+                "requiring Microsoft Graph will fail until modules are installed in "
+                "Manage runtimes → Modules & console.\n\nRun anyway?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         scopes = sorted({scope for script in selected for scope in graph_scopes(script)})
         scope_text = "\n".join(f"• {scope}" for scope in scopes) or "Scopes are declared by the scripts."
         answer = QMessageBox.question(
@@ -340,15 +396,11 @@ class RunScriptsDialog(QDialog):
             return
         script = self.queue[self.current_index]
         self.progress.setValue(self.current_index)
-        environment = QProcessEnvironment.systemEnvironment()
-        existing_modules = environment.value("PSModulePath")
-        embedded = str(modules_dir())
-        environment.insert(
-            "PSModulePath",
-            embedded + (f"{os.pathsep}{existing_modules}" if existing_modules else ""),
-        )
+        environment = QProcessEnvironment()
+        for key, value in powershell_environment(self.pwsh_runtime).items():
+            environment.insert(key, value)
         environment.insert("REPORTS_DIR", str(self.report_dir))
-        environment.insert("POWERSHELL_TELEMETRY_OPTOUT", "1")
+        environment.insert("DIFFASAURUS_SCRIPT_PATH", str(script))
         self.process.setProcessEnvironment(environment)
         self.process.setWorkingDirectory(str(project_root()))
         self.append(f"\n▶ {script.name}\n")
@@ -359,8 +411,8 @@ class RunScriptsDialog(QDialog):
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-File",
-                str(script),
+                "-Command",
+                REPORT_COMMAND,
             ),
         )
         if not self.process.waitForStarted(3000):

@@ -74,15 +74,29 @@ platform-specific installation locations—even when a packaged macOS app does
 not inherit the Terminal path.
 
 Use **Manage runtimes** to inspect detected versions and architectures, choose
-the active version, or import an extracted portable PowerShell distribution.
-Imported runtimes are copied into Diffasaurus application data and can be
-removed independently. The selected runtime is remembered. The report list
-marks expected business-day snapshots that are absent, and **Select missing**
-can rerun only those reports into the active local, OneDrive, or
-SharePoint-synchronized CSV folder.
+the active version, or import an extracted portable PowerShell distribution by
+selecting its `pwsh` or `pwsh.exe`. Import, removal, and rescans run in the
+background so large runtimes do not freeze the interface. Imported runtimes are
+copied into Diffasaurus application data and can be removed independently. The
+selected runtime is remembered.
 
-Modules installed for the current PowerShell user are supported. Portable
-modules can additionally be placed inside `psmodules/`.
+Every runtime has its own private module directory and analysis cache. Normal
+CurrentUser, AllUsers, and other-version module locations are deliberately
+hidden during report execution. Open **Modules & console** to:
+
+- inspect and remove modules belonging only to the selected runtime;
+- install a specific module and optional exact version;
+- install the Microsoft Graph and Exchange Online report modules; and
+- use a persistent embedded console backed by the exact selected `pwsh`.
+
+This isolation means a newly added runtime starts with no private report
+modules, even if another PowerShell installation already has them. Install the
+required modules separately for every runtime you want to test. PowerShell's
+own built-in modules remain available.
+
+The report list marks expected business-day snapshots that are absent, and
+**Select missing** can rerun only those reports into the active local,
+OneDrive, or SharePoint-synchronized CSV folder.
 
 ## Build a distributable application
 
@@ -107,7 +121,8 @@ Run the Windows build from PowerShell:
 
 The resulting archive is written to
 `release/Diffasaurus-<version>-Windows-x64.zip`. Packaged Windows builds keep
-settings, caches, generated reports, and portable modules under
+settings, caches, generated reports, portable runtimes, and isolated runtime
+module environments under
 `%LOCALAPPDATA%\Diffasaurus`. The GitHub Actions workflow named
 **Windows portable build** can also be started manually and uploads the archive
 as a workflow artifact. Signing is intentionally deferred for the preview
@@ -124,7 +139,8 @@ scripts/build_macos.sh
 
 The resulting Apple-silicon image is written to
 `release/Diffasaurus-<version>-macOS-arm64.dmg`. Packaged macOS builds keep local
-settings, caches, generated reports, and portable modules under
+settings, caches, generated reports, portable runtimes, and isolated runtime
+module environments under
 `~/Library/Application Support/Diffasaurus`, never inside the signed app bundle.
 
 For normal Gatekeeper acceptance outside the Mac App Store, set
