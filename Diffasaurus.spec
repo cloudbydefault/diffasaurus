@@ -5,8 +5,15 @@ from pathlib import Path
 root = Path(SPECPATH)
 version = "0.1.0"
 macos_icon = root / "assets" / "diffasaurus-icon.icns"
+windows_icon = root / "assets" / "diffasaurus-icon.ico"
 default_icon = root / "assets" / "diffasaurus-icon.png"
-icon_path = macos_icon if sys.platform == "darwin" else default_icon
+icon_path = (
+    macos_icon
+    if sys.platform == "darwin"
+    else windows_icon
+    if sys.platform == "win32"
+    else default_icon
+)
 signing_identity = os.environ.get("DIFFASAURUS_SIGN_IDENTITY")
 entitlements = root / "packaging" / "macos" / "entitlements.plist"
 datas = [

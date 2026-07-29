@@ -34,10 +34,13 @@ from diffasaurus.core.report_history import (
     analyze_snapshot,
     common_headers,
     compare_snapshots,
+    filter_history_by_days,
+    metric_series,
     recent_movement,
     report_run_health,
     save_analysis_cache,
     scan_report_index,
+    schema_changes,
     suggested_key,
 )
 from diffasaurus.core.paths import project_root
@@ -64,26 +67,36 @@ DETAIL_TABLE_LIMIT = 2_000
 
 class WorkerSignals(QObject):
     result = pyqtSignal(object)
+    partial = pyqtSignal(object)
     error = pyqtSignal(str)
     finished = pyqtSignal()
     progress = pyqtSignal(int, int, str)
 
 
 class BackgroundTask(QRunnable):
-    def __init__(self, function, *args, with_progress: bool = False):
+    def __init__(
+        self,
+        function,
+        *args,
+        with_progress: bool = False,
+        with_partial: bool = False,
+    ):
         super().__init__()
         self.function = function
         self.args = args
         self.with_progress = with_progress
+        self.with_partial = with_partial
         self.signals = WorkerSignals()
 
     @pyqtSlot()
     def run(self):
         try:
+            callbacks = {}
             if self.with_progress:
-                result = self.function(*self.args, progress=self.signals.progress.emit)
-            else:
-                result = self.function(*self.args)
+                callbacks["progress"] = self.signals.progress.emit
+            if self.with_partial:
+                callbacks["partial"] = self.signals.partial.emit
+            result = self.function(*self.args, **callbacks)
         except Exception as exc:
             self.signals.error.emit(str(exc))
         else:
@@ -96,6 +109,7 @@ def analyze_family(
     snapshots: list[ReportSnapshot],
     cancelled: threading.Event,
     progress=None,
+    partial=None,
 ):
     title = snapshots[0].family if snapshots else "Report history"
     history = []
@@ -107,6 +121,8 @@ def analyze_family(
             return None
         hydrated, title, metrics = analyze_snapshot(snapshot)
         history.append((hydrated, metrics))
+        if partial and (index == 1 or index == total or index % 20 == 0):
+            partial((title, list(history)))
         if progress:
             progress(index, total, snapshot.path.name)
     if cancelled.is_set():
@@ -116,7 +132,7 @@ def analyze_family(
     hydrated = [snapshot for snapshot, _metrics in history]
     movement, latest_summary = recent_movement(hydrated, max_intervals=12)
     save_analysis_cache()
-    return title, history, movement, latest_summary
+    return title, history, movement, latest_summary, schema_changes(hydrated)
 
 
 class MetricCard(QFrame):
@@ -164,6 +180,7 @@ class DiffasaurusWindow(QMainWindow):
         self.report_dir = get_active_reports_dir()
         self.families: dict[str, list[ReportSnapshot]] = {}
         self.current_history: list[tuple[ReportSnapshot, dict[str, float]]] = []
+        self.current_schema_changes = []
         self.current_comparison: ComparisonSummary | None = None
         self.current_filter = "All"
         self.thread_pool = QThreadPool(self)
@@ -330,6 +347,8 @@ class DiffasaurusWindow(QMainWindow):
         )
         self.content_layout.setSpacing(14 if narrow else 17 if compact else 22)
         self.family_combo.setMinimumWidth(180 if narrow else 240 if compact else 330)
+        self.metric_combo.setMinimumWidth(150 if narrow else 200 if compact else 260)
+        self.aggregation_combo.setVisible(not narrow)
         self.source_badge.setVisible(not narrow)
         self.page_subtitle.setVisible(not narrow)
         if hasattr(self, "line_chart"):
@@ -370,7 +389,34 @@ class DiffasaurusWindow(QMainWindow):
         self.metric_combo = QComboBox()
         self.metric_combo.setMinimumWidth(260)
         chart_header.addWidget(self.metric_combo)
+        self.range_combo = QComboBox()
+        self.range_combo.setToolTip("Limit the visible history without deleting snapshots")
+        for label, days in (
+            ("30 days", 30),
+            ("90 days", 90),
+            ("1 year", 365),
+            ("2 years", 730),
+            ("All history", None),
+        ):
+            self.range_combo.addItem(label, days)
+        self.range_combo.setCurrentText("1 year")
+        chart_header.addWidget(self.range_combo)
+        self.aggregation_combo = QComboBox()
+        self.aggregation_combo.setToolTip(
+            "Auto keeps daily detail for short ranges and summarizes long ranges"
+        )
+        for label, value in (
+            ("Auto detail", "auto"),
+            ("Daily", "daily"),
+            ("Weekly", "weekly"),
+            ("Monthly", "monthly"),
+        ):
+            self.aggregation_combo.addItem(label, value)
+        chart_header.addWidget(self.aggregation_combo)
         layout.addLayout(chart_header)
+        self.schema_badge = QLabel("Schema pending")
+        self.schema_badge.setObjectName("schemaBadge")
+        layout.addWidget(self.schema_badge, 0, Qt.AlignmentFlag.AlignRight)
         self.line_chart = LineChart()
         layout.addWidget(self.line_chart, 3)
         movement_title = QLabel("Movement between snapshots")
@@ -537,6 +583,8 @@ class DiffasaurusWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_history)
         self.family_combo.currentIndexChanged.connect(self.family_changed)
         self.metric_combo.currentTextChanged.connect(self.metric_changed)
+        self.range_combo.currentIndexChanged.connect(self.metric_changed)
+        self.aggregation_combo.currentIndexChanged.connect(self.metric_changed)
         self.library_search.textChanged.connect(self.filter_library)
         self.baseline_combo.currentIndexChanged.connect(self.snapshot_selection_changed)
         self.latest_combo.currentIndexChanged.connect(self.snapshot_selection_changed)
@@ -563,14 +611,23 @@ class DiffasaurusWindow(QMainWindow):
         on_result,
         on_error,
         on_progress=None,
+        on_partial=None,
         with_progress: bool = False,
+        with_partial: bool = False,
     ):
-        worker = BackgroundTask(function, *args, with_progress=with_progress)
+        worker = BackgroundTask(
+            function,
+            *args,
+            with_progress=with_progress,
+            with_partial=with_partial,
+        )
         self._workers.add(worker)
         worker.signals.result.connect(on_result)
         worker.signals.error.connect(on_error)
         if on_progress:
             worker.signals.progress.connect(on_progress)
+        if on_partial:
+            worker.signals.partial.connect(on_partial)
         worker.signals.finished.connect(lambda: self._workers.discard(worker))
         self.thread_pool.start(worker)
 
@@ -765,15 +822,48 @@ class DiffasaurusWindow(QMainWindow):
                 if generation == self._family_generation
                 else None
             ),
+            lambda payload: self._family_partial(generation, family, payload),
             with_progress=True,
+            with_partial=True,
         )
+
+    def _family_partial(self, generation: int, family: str, payload):
+        if generation != self._family_generation or family != self.family_combo.currentText():
+            return
+        _title, history = payload
+        self.current_history = history
+        available = []
+        for _snapshot, metrics in history:
+            for metric in metrics:
+                if metric not in available:
+                    available.append(metric)
+        selected = self._preferred_metric or self.metric_combo.currentText()
+        current_items = [
+            self.metric_combo.itemText(index)
+            for index in range(self.metric_combo.count())
+        ]
+        if current_items != available:
+            self.metric_combo.blockSignals(True)
+            self.metric_combo.clear()
+            self.metric_combo.addItems(available)
+            if selected in available:
+                self.metric_combo.setCurrentText(selected)
+            self.metric_combo.blockSignals(False)
+        self.metric_combo.setEnabled(bool(available))
+        self.metric_changed()
 
     def _family_ready(self, generation: int, family: str, payload):
         if generation != self._family_generation or family != self.family_combo.currentText():
             return
         if payload is None:
             return
-        _title, self.current_history, movement, latest_summary = payload
+        (
+            _title,
+            self.current_history,
+            movement,
+            latest_summary,
+            self.current_schema_changes,
+        ) = payload
         snapshots = [snapshot for snapshot, _metrics in self.current_history]
         self.families[family] = snapshots
         self._populate_library(snapshots)
@@ -798,6 +888,7 @@ class DiffasaurusWindow(QMainWindow):
         self._hide_progress()
         self.metric_changed()
         self._show_movement(movement, latest_summary)
+        self._show_schema_changes()
 
     def _family_failed(self, generation: int, family: str, message: str):
         if generation != self._family_generation or family != self.family_combo.currentText():
@@ -812,19 +903,53 @@ class DiffasaurusWindow(QMainWindow):
 
     def metric_changed(self):
         metric = self.metric_combo.currentText()
-        values, labels = [], []
-        for snapshot, metrics in self.current_history:
-            if metric in metrics:
-                values.append(metrics[metric])
-                labels.append(snapshot.captured_at.strftime("%d %b"))
+        days = self.range_combo.currentData()
+        aggregation = self.aggregation_combo.currentData() or "auto"
+        values, labels, effective, visible_count = metric_series(
+            self.current_history,
+            metric,
+            days=days,
+            aggregation=aggregation,
+        )
         self.line_chart.set_series(values, labels)
-        current = values[-1] if values else 0
-        previous = values[-2] if len(values) > 1 else current
+        raw_values = [
+            metrics[metric]
+            for _snapshot, metrics in filter_history_by_days(self.current_history, days)
+            if metric in metrics
+        ]
+        current = raw_values[-1] if raw_values else 0
+        previous = raw_values[-2] if len(raw_values) > 1 else current
         delta = current - previous
-        delta_text = f"{delta:+,.0f}" if len(values) > 1 else "—"
+        delta_text = f"{delta:+,.0f}" if len(raw_values) > 1 else "—"
         self.card_current.set_data(f"{current:,.0f}", metric or "No metric")
         self.card_delta.set_data(delta_text, "versus previous snapshot")
-        self.card_snapshots.set_data(str(len(self.current_history)), "CSV snapshots available")
+        total = len(self.families.get(self.family_combo.currentText(), []))
+        resolution = effective.capitalize()
+        self.card_snapshots.set_data(
+            str(total),
+            f"{visible_count:,} in range · {resolution} chart",
+        )
+
+    def _show_schema_changes(self):
+        changes = self.current_schema_changes
+        if not changes:
+            self.schema_badge.setText("✓  Schema stable")
+            self.schema_badge.setStyleSheet(f"color:{COLORS['green']};")
+            self.schema_badge.setToolTip("No column additions or removals found in this history.")
+            return
+        self.schema_badge.setText(
+            f"△  {len(changes)} schema shift{'s' if len(changes) != 1 else ''}"
+        )
+        self.schema_badge.setStyleSheet(f"color:{COLORS['amber']};")
+        descriptions = []
+        for captured_at, added, removed in changes[-20:]:
+            parts = []
+            if added:
+                parts.append("added " + ", ".join(added))
+            if removed:
+                parts.append("removed " + ", ".join(removed))
+            descriptions.append(f"{captured_at:%d %b %Y}: {'; '.join(parts)}")
+        self.schema_badge.setToolTip("\n".join(descriptions))
 
     def _show_movement(self, series, latest_summary):
         self.change_bars.set_series(series)
@@ -1074,6 +1199,14 @@ def diffasaurus_stylesheet() -> str:
             font-size: 10px;
             font-weight: 700;
             letter-spacing: .5px;
+        }}
+        QLabel#schemaBadge {{
+            background: #101f2b;
+            border: 1px solid {COLORS['border']};
+            border-radius: 8px;
+            padding: 5px 9px;
+            font-size: 10px;
+            font-weight: 650;
         }}
         QPushButton {{
             background: #142330;
