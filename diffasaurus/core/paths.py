@@ -7,12 +7,23 @@ from pathlib import Path
 
 def project_root() -> Path:
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return Path(sys.executable).resolve().parents[1] / "Resources"
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
 
 
+def user_data_dir() -> Path:
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        path = Path.home() / "Library" / "Application Support" / "Diffasaurus"
+    else:
+        path = project_root()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def reports_dir() -> Path:
-    path = project_root() / "reports"
+    path = user_data_dir() / "reports"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -22,7 +33,7 @@ def scripts_dir() -> Path:
 
 
 def modules_dir() -> Path:
-    path = project_root() / "psmodules"
+    path = user_data_dir() / "psmodules"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

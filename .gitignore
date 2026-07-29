@@ -4,6 +4,7 @@ __pycache__/
 .idea/
 build/
 dist/
+release/
 config/settings.json
 config/analysis_cache.json
 config/analysis_cache.tmp

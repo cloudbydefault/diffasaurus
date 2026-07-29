@@ -83,6 +83,27 @@ pyinstaller --clean Diffasaurus.spec
 The result is created in `dist/Diffasaurus/`. Build separately on macOS
 and Windows; PyInstaller applications are platform-specific.
 
+### macOS disk image
+
+On macOS, the build also creates `dist/Diffasaurus.app`. Package it as a
+compressed disk image with:
+
+```bash
+scripts/build_macos.sh
+```
+
+The resulting Apple-silicon image is written to
+`release/Diffasaurus-0.1.0-macOS-arm64.dmg`. Packaged macOS builds keep local
+settings, caches, generated reports, and portable modules under
+`~/Library/Application Support/Diffasaurus`, never inside the signed app bundle.
+
+For normal Gatekeeper acceptance outside the Mac App Store, set
+`DIFFASAURUS_SIGN_IDENTITY` to a **Developer ID Application** identity and
+`DIFFASAURUS_NOTARY_PROFILE` to an `xcrun notarytool` keychain profile before
+running the script. Without those credentials the build is ad-hoc signed for
+local testing only and should be published as a preview, not as a trusted
+production installer.
+
 ## Publishing on GitHub
 
 The `.gitignore` excludes tenant CSV data, local settings, portable runtimes,
