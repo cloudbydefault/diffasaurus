@@ -2,8 +2,15 @@ import os
 import sys
 from pathlib import Path
 
+from diffasaurus import __release_label__, __version__
+
 root = Path(SPECPATH)
-version = "0.1.0"
+version = __version__.split("rc", 1)[0]
+build_version = (
+    f"{version}.{__version__.split('rc', 1)[1]}"
+    if "rc" in __version__
+    else version
+)
 macos_icon = root / "assets" / "diffasaurus-icon.icns"
 windows_icon = root / "assets" / "diffasaurus-icon.ico"
 default_icon = root / "assets" / "diffasaurus-icon.png"
@@ -68,7 +75,8 @@ if sys.platform == "darwin":
             "CFBundleDisplayName": "Diffasaurus",
             "CFBundleName": "Diffasaurus",
             "CFBundleShortVersionString": version,
-            "CFBundleVersion": version,
+            "CFBundleVersion": build_version,
+            "DiffasaurusReleaseLabel": __release_label__,
             "LSMinimumSystemVersion": "12.0",
             "NSHighResolutionCapable": True,
             "NSPrincipalClass": "NSApplication",
