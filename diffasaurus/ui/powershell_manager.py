@@ -39,6 +39,18 @@ from diffasaurus.ui.powershell_environment import PowerShellEnvironmentDialog
 RUNTIME_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
+def discover_runtime_inventory() -> list[tuple[PowerShellRuntime, int, int]]:
+    """Discover runtimes and both module counts in one background lifecycle."""
+    return [
+        (
+            runtime,
+            private_module_count(runtime),
+            len(list_installed_modules(runtime)),
+        )
+        for runtime in discover_powershell_runtimes()
+    ]
+
+
 class PowerShellManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -167,9 +179,9 @@ class PowerShellManagerDialog(QDialog):
         generation = self._refresh_generation
         self._set_busy(True, "Scanning PowerShell installations in the background…")
         self._start_background(
-            discover_powershell_runtimes,
-            lambda runtimes: self._runtimes_loaded(
-                list(runtimes),
+            discover_runtime_inventory,
+            lambda inventory: self._runtimes_loaded(
+                list(inventory),
                 preferred_path,
                 generation,
             ),
@@ -177,26 +189,26 @@ class PowerShellManagerDialog(QDialog):
 
     def _runtimes_loaded(
         self,
-        runtimes: list[PowerShellRuntime],
+        inventory: list[tuple[PowerShellRuntime, int, int]],
         preferred: Path | None,
         generation: int,
     ):
         if generation != self._refresh_generation:
             return
-        self.runtimes = runtimes
+        self.runtimes = [runtime for runtime, _isolated, _installed in inventory]
         active = selected_powershell_runtime(self.runtimes)
         preferred_key = str(preferred.resolve()) if preferred else ""
         active_key = active.identity if active else ""
         self.table.setRowCount(len(self.runtimes))
         selected_row = -1
-        for row, runtime in enumerate(self.runtimes):
+        for row, (runtime, isolated_count, installed_count) in enumerate(inventory):
             values = (
                 "●" if runtime.identity == active_key else "",
                 runtime.version,
                 runtime.source,
                 runtime.architecture or "Unknown",
-                str(private_module_count(runtime)),
-                "Scanning…",
+                str(isolated_count),
+                str(installed_count),
                 str(runtime.path),
             )
             for column, value in enumerate(values):
@@ -217,17 +229,11 @@ class PowerShellManagerDialog(QDialog):
                     )
                 elif column == 5:
                     item.setToolTip(
-                        "Scanning user and machine module locations…"
+                        "User and machine modules visible to this PowerShell "
+                        "outside Diffasaurus. Built-in modules are excluded."
                     )
                 item.setData(RUNTIME_ROLE, runtime)
                 self.table.setItem(row, column, item)
-            self._start_background(
-                list_installed_modules,
-                lambda modules, identity=runtime.identity: self._installed_modules_loaded(
-                    identity, len(modules)
-                ),
-                runtime,
-            )
             if runtime.identity == preferred_key or (
                 selected_row < 0 and runtime.identity == active_key
             ):
@@ -244,20 +250,6 @@ class PowerShellManagerDialog(QDialog):
             else "No usable PowerShell runtime detected. Add an extracted portable PowerShell folder."
         )
         self._selection_changed()
-
-    def _installed_modules_loaded(self, identity: str, count: int):
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            runtime = item.data(RUNTIME_ROLE) if item else None
-            if isinstance(runtime, PowerShellRuntime) and runtime.identity == identity:
-                count_item = self.table.item(row, 5)
-                if count_item is not None:
-                    count_item.setText(str(count))
-                    count_item.setToolTip(
-                        "User and machine modules visible to this PowerShell "
-                        "outside Diffasaurus. Built-in modules are excluded."
-                    )
-                return
 
     def _current_runtime(self) -> PowerShellRuntime | None:
         row = self.table.currentRow()

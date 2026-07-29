@@ -132,17 +132,22 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
                 side_effect=slow_inventory,
             ),
         ):
+            started = time.monotonic()
             dialog = PowerShellManagerDialog()
             dialog.show()
+            self.app.processEvents()
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.15)
+            self.assertTrue(dialog.progress.isVisible())
             self.assertTrue(
-                self._wait_for(lambda: dialog.table.rowCount() == 1)
+                self._wait_for(
+                    lambda: dialog.table.rowCount() == 1
+                    and dialog.table.item(0, 5).text() == "2"
+                )
             )
-            self.assertEqual(dialog.table.item(0, 5).text(), "Scanning…")
-            self.assertTrue(
-                self._wait_for(lambda: dialog.table.item(0, 5).text() == "2")
-            )
-            dialog.close()
             QThreadPool.globalInstance().waitForDone(2_000)
+            self.app.processEvents()
+            dialog.close()
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_embedded_console_is_persistent_and_isolated(self):
