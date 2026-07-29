@@ -9,7 +9,11 @@ fi
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 
-version=${DIFFASAURUS_VERSION:-0.1.0}
+version=$(
+    "$project_dir/.venv/bin/python" -c \
+        'from diffasaurus import __release_label__; print(__release_label__)'
+)
+version=${DIFFASAURUS_VERSION:-$version}
 architecture=$(uname -m)
 release_dir="$project_dir/release"
 app_path="$project_dir/dist/Diffasaurus.app"

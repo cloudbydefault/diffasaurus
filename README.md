@@ -96,7 +96,7 @@ Run the Windows build from PowerShell:
 ```
 
 The resulting archive is written to
-`release/Diffasaurus-0.1.0-Windows-x64.zip`. Packaged Windows builds keep
+`release/Diffasaurus-<version>-Windows-x64.zip`. Packaged Windows builds keep
 settings, caches, generated reports, and portable modules under
 `%LOCALAPPDATA%\Diffasaurus`. The GitHub Actions workflow named
 **Windows portable build** can also be started manually and uploads the archive
@@ -113,7 +113,7 @@ scripts/build_macos.sh
 ```
 
 The resulting Apple-silicon image is written to
-`release/Diffasaurus-0.1.0-macOS-arm64.dmg`. Packaged macOS builds keep local
+`release/Diffasaurus-<version>-macOS-arm64.dmg`. Packaged macOS builds keep local
 settings, caches, generated reports, and portable modules under
 `~/Library/Application Support/Diffasaurus`, never inside the signed app bundle.
 

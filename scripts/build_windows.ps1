@@ -1,7 +1,12 @@
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Version = "0.1.0"
+$Version = (
+    python -c "from diffasaurus import __release_label__; print(__release_label__)"
+).Trim()
+if ($env:DIFFASAURUS_VERSION) {
+    $Version = $env:DIFFASAURUS_VERSION
+}
 $ReleaseDirectory = Join-Path $ProjectRoot "release"
 $Archive = Join-Path $ReleaseDirectory "Diffasaurus-$Version-Windows-x64.zip"
 
