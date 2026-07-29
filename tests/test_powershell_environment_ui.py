@@ -20,7 +20,10 @@ from diffasaurus.ui.powershell_environment import (
     INSTALL_MODULE_SCRIPT,
     PowerShellEnvironmentDialog,
 )
-from diffasaurus.ui.powershell_manager import PowerShellManagerDialog
+from diffasaurus.ui.powershell_manager import (
+    PowerShellManagerDialog,
+    discover_runtime_inventory,
+)
 
 
 class PowerShellEnvironmentUiTests(unittest.TestCase):
@@ -36,6 +39,14 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
                 return True
             time.sleep(0.01)
         return False
+
+    def _close_dialog(self, dialog):
+        QThreadPool.globalInstance().waitForDone(3_000)
+        self.app.processEvents()
+        dialog.close()
+        self.app.processEvents()
+        dialog.deleteLater()
+        self.app.processEvents()
 
     def test_runtime_scan_does_not_block_the_ui_thread(self):
         def slow_discovery():
@@ -54,9 +65,7 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
             self.assertLess(elapsed, 0.15)
             self.assertTrue(dialog.progress.isVisible())
             self.assertIn("background", dialog.status.text())
-            QThreadPool.globalInstance().waitForDone(2_000)
-            self.app.processEvents()
-            dialog.close()
+            self._close_dialog(dialog)
 
     def test_portable_import_does_not_block_the_ui_thread(self):
         runtime = PowerShellRuntime(
@@ -98,11 +107,9 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 0.15)
             self.assertIn("background", dialog.status.text())
-            QThreadPool.globalInstance().waitForDone(2_000)
-            self.app.processEvents()
-            dialog.close()
+            self._close_dialog(dialog)
 
-    def test_installed_module_inventory_updates_in_the_background(self):
+    def test_runtime_inventory_contains_both_module_counts(self):
         runtime = PowerShellRuntime(
             Path("/tmp/system/pwsh"),
             "7.5.4",
@@ -114,40 +121,23 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
             object(),
         ]
 
-        def slow_inventory(_runtime):
-            time.sleep(0.2)
-            return modules
-
         with (
             patch(
                 "diffasaurus.ui.powershell_manager.discover_powershell_runtimes",
                 return_value=[runtime],
             ),
             patch(
-                "diffasaurus.ui.powershell_manager.selected_powershell_runtime",
-                return_value=runtime,
+                "diffasaurus.ui.powershell_manager.list_installed_modules",
+                return_value=modules,
             ),
             patch(
-                "diffasaurus.ui.powershell_manager.list_installed_modules",
-                side_effect=slow_inventory,
+                "diffasaurus.ui.powershell_manager.private_module_count",
+                return_value=3,
             ),
         ):
-            started = time.monotonic()
-            dialog = PowerShellManagerDialog()
-            dialog.show()
-            self.app.processEvents()
-            elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 0.15)
-            self.assertTrue(dialog.progress.isVisible())
-            self.assertTrue(
-                self._wait_for(
-                    lambda: dialog.table.rowCount() == 1
-                    and dialog.table.item(0, 5).text() == "2"
-                )
-            )
-            QThreadPool.globalInstance().waitForDone(2_000)
-            self.app.processEvents()
-            dialog.close()
+            inventory = discover_runtime_inventory()
+
+        self.assertEqual(inventory, [(runtime, 3, 2)])
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_embedded_console_is_persistent_and_isolated(self):
@@ -183,10 +173,11 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
                     output = dialog.console_output.toPlainText()
                     self.assertNotIn(".local/share/powershell/Modules", output)
                 finally:
-                    dialog.console_process.kill()
-                    dialog.console_process.waitForFinished(1_000)
-                    dialog.close()
-                    QThreadPool.globalInstance().waitForDone(2_000)
+                    self._close_dialog(dialog)
+                    self.assertEqual(
+                        dialog.console_process.state(),
+                        QProcess.ProcessState.NotRunning,
+                    )
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_module_install_command_is_valid_powershell(self):

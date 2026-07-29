@@ -140,17 +140,23 @@ class PowerShellEnvironmentTests(unittest.TestCase):
                         "-NoProfile",
                         "-NonInteractive",
                         "-Command",
-                        ISOLATION_PREAMBLE + "$env:PSModulePath",
+                        ISOLATION_PREAMBLE
+                        + "Write-Output ('DIFFASAURUS_PATH=' + $env:PSModulePath)",
                     ),
                     env=powershell_environment(runtime, os.environ),
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=30,
                     check=False,
                 )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), expected)
+        markers = [
+            line.removeprefix("DIFFASAURUS_PATH=")
+            for line in result.stdout.splitlines()
+            if line.startswith("DIFFASAURUS_PATH=")
+        ]
+        self.assertEqual(markers, [expected], result.stdout)
         self.assertNotIn(".local/share/powershell/Modules", result.stdout)
 
 

@@ -655,7 +655,7 @@ class PowerShellEnvironmentDialog(QDialog):
             self.install_process.waitForFinished(1_000)
         if self.console_process.state() != QProcess.ProcessState.NotRunning:
             self.console_process.write(b"exit\n")
-            if not self.console_process.waitForFinished(500):
+            if not self.console_process.waitForFinished(2_000):
                 self.console_process.kill()
-                self.console_process.waitForFinished(500)
+                self.console_process.waitForFinished(2_000)
         event.accept()
