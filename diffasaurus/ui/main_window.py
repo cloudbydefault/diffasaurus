@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -157,7 +158,9 @@ class DiffasaurusWindow(QMainWindow):
         icon_path = application_icon_path()
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1440, 880)
+        self.setMinimumSize(640, 480)
+        self._screen_fitted = False
+        self._screen_signal_connected = False
         self.report_dir = get_active_reports_dir()
         self.families: dict[str, list[ReportSnapshot]] = {}
         self.current_history: list[tuple[ReportSnapshot, dict[str, float]]] = []
@@ -186,10 +189,12 @@ class DiffasaurusWindow(QMainWindow):
         shell = QHBoxLayout(root)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
+        shell.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(246)
+        self.sidebar = sidebar
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(22, 28, 22, 22)
         side.setSpacing(8)
@@ -227,6 +232,7 @@ class DiffasaurusWindow(QMainWindow):
         outer = QVBoxLayout(content)
         outer.setContentsMargins(34, 28, 34, 30)
         outer.setSpacing(22)
+        self.content_layout = outer
 
         top = QHBoxLayout()
         heading_box = QVBoxLayout()
@@ -270,6 +276,76 @@ class DiffasaurusWindow(QMainWindow):
         self.stack.addWidget(self._build_compare())
         outer.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._screen_signal_connected and self.windowHandle():
+            self.windowHandle().screenChanged.connect(self._fit_to_screen)
+            self._screen_signal_connected = True
+        if not self._screen_fitted:
+            self._screen_fitted = True
+            QTimer.singleShot(0, self._fit_to_screen)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_responsive_layout(event.size().width(), event.size().height())
+
+    def _fit_to_screen(self, screen=None):
+        screen = screen or self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        target_width = max(720, int(available.width() * 0.94))
+        target_height = max(600, int(available.height() * 0.90))
+        width = min(1440, target_width, available.width())
+        height = min(900, target_height, available.height())
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        extra_width = max(0, frame.width() - self.width())
+        extra_height = max(0, frame.height() - self.height())
+        if frame.width() > available.width() or frame.height() > available.height():
+            width = min(width, max(480, available.width() - extra_width))
+            height = min(height, max(400, available.height() - extra_height))
+            self.resize(width, height)
+            frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+        self._apply_responsive_layout(width, height)
+
+    def _apply_responsive_layout(self, width: int, height: int | None = None):
+        if not hasattr(self, "sidebar"):
+            return
+        height = height or self.height()
+        narrow = width < 1_000
+        compact = width < 1_250
+        short = height < 760
+        self.sidebar.setFixedWidth(180 if narrow else 210 if compact else 246)
+        horizontal_margin = 16 if narrow else 24 if compact else 34
+        vertical_margin = 18 if compact else 28
+        self.content_layout.setContentsMargins(
+            horizontal_margin,
+            vertical_margin,
+            horizontal_margin,
+            20 if compact else 30,
+        )
+        self.content_layout.setSpacing(14 if narrow else 17 if compact else 22)
+        self.family_combo.setMinimumWidth(180 if narrow else 240 if compact else 330)
+        self.source_badge.setVisible(not narrow)
+        self.page_subtitle.setVisible(not narrow)
+        if hasattr(self, "line_chart"):
+            self.line_chart.setMinimumHeight(170 if short else 260)
+            self.change_bars.setMinimumHeight(150 if short else 230)
+            for card in (
+                self.card_current,
+                self.card_delta,
+                self.card_changes,
+                self.card_snapshots,
+                self.health_coverage,
+                self.health_observed,
+                self.health_missing,
+                self.health_latest,
+            ):
+                card.setMinimumHeight(100 if short else 118)
 
     def _build_overview(self) -> QWidget:
         page = QWidget()
