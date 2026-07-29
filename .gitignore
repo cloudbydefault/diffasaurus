@@ -8,6 +8,7 @@ release/
 config/settings.json
 config/analysis_cache.json
 config/analysis_cache.tmp
+config/*.sqlite3*
 reports/*.csv
 !reports/.gitkeep
 pwsh/*

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -287,7 +288,16 @@ class DiffasaurusWindow(QMainWindow):
         outer.addWidget(self.loading_bar)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_overview())
+        self.overview_page = self._build_overview()
+        overview_scroll = QScrollArea()
+        overview_scroll.setObjectName("overviewScroll")
+        overview_scroll.setWidgetResizable(True)
+        overview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        overview_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        overview_scroll.setWidget(self.overview_page)
+        self.stack.addWidget(overview_scroll)
         self.stack.addWidget(self._build_run_health())
         self.stack.addWidget(self._build_library())
         self.stack.addWidget(self._build_compare())
@@ -335,7 +345,8 @@ class DiffasaurusWindow(QMainWindow):
         height = height or self.height()
         narrow = width < 1_000
         compact = width < 1_250
-        short = height < 760
+        short = height < 1_000
+        very_short = height < 720
         self.sidebar.setFixedWidth(180 if narrow else 210 if compact else 246)
         horizontal_margin = 16 if narrow else 24 if compact else 34
         vertical_margin = 18 if compact else 28
@@ -348,12 +359,26 @@ class DiffasaurusWindow(QMainWindow):
         self.content_layout.setSpacing(14 if narrow else 17 if compact else 22)
         self.family_combo.setMinimumWidth(180 if narrow else 240 if compact else 330)
         self.metric_combo.setMinimumWidth(150 if narrow else 200 if compact else 260)
+        self.metric_combo.setMaximumWidth(190 if narrow else 280 if compact else 16777215)
+        self.range_combo.setMaximumWidth(110 if narrow else 140)
+        self.aggregation_combo.setMaximumWidth(140)
         self.aggregation_combo.setVisible(not narrow)
         self.source_badge.setVisible(not narrow)
         self.page_subtitle.setVisible(not narrow)
         if hasattr(self, "line_chart"):
-            self.line_chart.setMinimumHeight(170 if short else 260)
-            self.change_bars.setMinimumHeight(150 if short else 230)
+            self.overview_layout.setSpacing(8 if very_short else 10 if short else 16)
+            self.overview_page.setMinimumHeight(
+                520 if very_short else 630 if short else 800
+            )
+            line_height = 140 if very_short else 190 if short else 260
+            movement_height = 120 if very_short else 170 if short else 230
+            self.line_chart.setMinimumHeight(line_height)
+            self.change_bars.setMinimumHeight(movement_height)
+            self.line_chart.setMaximumHeight(175 if very_short else 220 if short else 16777215)
+            self.change_bars.setMaximumHeight(
+                145 if very_short else 190 if short else 16777215
+            )
+            self.movement_title.setFixedHeight(24)
             for card in (
                 self.card_current,
                 self.card_delta,
@@ -364,11 +389,14 @@ class DiffasaurusWindow(QMainWindow):
                 self.health_missing,
                 self.health_latest,
             ):
-                card.setMinimumHeight(100 if short else 118)
+                card.setMinimumHeight(88 if very_short else 100 if short else 118)
+                card.setMaximumHeight(96 if very_short else 108 if short else 16777215)
 
     def _build_overview(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        self.overview_layout = layout
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
         cards = QHBoxLayout()
@@ -419,9 +447,10 @@ class DiffasaurusWindow(QMainWindow):
         layout.addWidget(self.schema_badge, 0, Qt.AlignmentFlag.AlignRight)
         self.line_chart = LineChart()
         layout.addWidget(self.line_chart, 3)
-        movement_title = QLabel("Movement between snapshots")
-        movement_title.setObjectName("sectionTitle")
-        layout.addWidget(movement_title)
+        self.movement_title = QLabel("Movement between snapshots")
+        self.movement_title.setObjectName("sectionTitle")
+        self.movement_title.setContentsMargins(0, 3, 0, 0)
+        layout.addWidget(self.movement_title)
         self.change_bars = ChangeBars()
         layout.addWidget(self.change_bars, 2)
         return page
