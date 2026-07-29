@@ -15,8 +15,11 @@ if (Get-Variable -Name PSStyle -Scope Global -ErrorAction SilentlyContinue) {
 # ==========================================================
 
 if (-not $OutputPath) {
-    $projectRoot = Split-Path -Parent $PSScriptRoot
-    $reportsDir  = Join-Path $projectRoot "reports"
+    $reportsDir = $env:REPORTS_DIR
+    if (-not $reportsDir) {
+        $projectRoot = Split-Path -Parent $PSScriptRoot
+        $reportsDir = Join-Path $projectRoot "reports"
+    }
 
     if (-not (Test-Path $reportsDir)) {
         New-Item -ItemType Directory -Path $reportsDir -Force | Out-Null

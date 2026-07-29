@@ -81,8 +81,11 @@ function Invoke-GraphGetAll {
 # ==========================================================
 
 if (-not $OutputPath) {
-    $projectRoot = Split-Path -Parent $PSScriptRoot
-    $reportsDir = Join-Path $projectRoot "reports"
+    $reportsDir = $env:REPORTS_DIR
+    if (-not $reportsDir) {
+        $projectRoot = Split-Path -Parent $PSScriptRoot
+        $reportsDir = Join-Path $projectRoot "reports"
+    }
 
     New-Item -Path $reportsDir -ItemType Directory -Force | Out-Null
 

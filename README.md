@@ -68,8 +68,18 @@ Intune_Devices_Autopilot_20260610_044056.csv
 ## Generate reports
 
 The included scripts require PowerShell 7 and the Microsoft Graph PowerShell
-modules required by each report. Diffasaurus uses `pwsh` from the system
-path, or a portable PowerShell runtime placed inside `pwsh/`.
+modules required by each report. **Generate reports** detects PowerShell from
+the current path, the login shell, Homebrew, Microsoft, and standard
+platform-specific installation locations—even when a packaged macOS app does
+not inherit the Terminal path.
+
+Use **Manage runtimes** to inspect detected versions and architectures, choose
+the active version, or import an extracted portable PowerShell distribution.
+Imported runtimes are copied into Diffasaurus application data and can be
+removed independently. The selected runtime is remembered. The report list
+marks expected business-day snapshots that are absent, and **Select missing**
+can rerun only those reports into the active local, OneDrive, or
+SharePoint-synchronized CSV folder.
 
 Modules installed for the current PowerShell user are supported. Portable
 modules can additionally be placed inside `psmodules/`.

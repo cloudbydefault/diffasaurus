@@ -53,8 +53,11 @@ function Resolve-PolicyEnabled {
 # Resolve default output path
 # ---------------------------------------------------------
 if (-not $OutputPath) {
-    $projectRoot = Split-Path -Parent $PSScriptRoot
-    $reportsDir = Join-Path $projectRoot "reports"
+    $reportsDir = $env:REPORTS_DIR
+    if (-not $reportsDir) {
+        $projectRoot = Split-Path -Parent $PSScriptRoot
+        $reportsDir = Join-Path $projectRoot "reports"
+    }
 
     if (-not (Test-Path $reportsDir)) {
         New-Item -Path $reportsDir -ItemType Directory -Force | Out-Null
