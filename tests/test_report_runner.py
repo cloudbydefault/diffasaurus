@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,11 +42,21 @@ class ReportRunnerTests(unittest.TestCase):
                 patch(
                     "diffasaurus.ui.report_runner.select_powershell_runtime",
                 ) as select_runtime,
+                patch(
+                    "diffasaurus.core.powershell_environment.powershell_environments_dir",
+                    return_value=Path(directory) / "environments",
+                ),
             ):
                 dialog = RunScriptsDialog()
+                deadline = time.monotonic() + 2
+                while not dialog.runtime_combo.currentText() and time.monotonic() < deadline:
+                    self.app.processEvents()
                 self.assertIn("PowerShell 7.5.4", dialog.runtime_combo.currentText())
                 self.assertEqual(dialog.pwsh_runtime, runtime)
-                self.assertEqual(dialog.runtime_status.text(), "Ready")
+                self.assertEqual(
+                    dialog.runtime_status.text(),
+                    "Ready · 0 private modules",
+                )
                 select_runtime.assert_called_with(runtime)
                 dialog.close()
 

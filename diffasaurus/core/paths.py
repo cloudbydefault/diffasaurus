@@ -53,6 +53,12 @@ def powershell_runtimes_dir() -> Path:
     return path
 
 
+def powershell_environments_dir() -> Path:
+    path = user_data_dir() / "powershell-environments"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def list_report_scripts() -> list[Path]:
     return sorted(scripts_dir().glob("*.ps1"), key=lambda path: path.name.lower())
 

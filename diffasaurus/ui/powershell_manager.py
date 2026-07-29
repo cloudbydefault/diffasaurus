@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl, Qt
+from PyQt6.QtCore import QThreadPool, QUrl, Qt
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
-    QApplication,
     QAbstractItemView,
     QDialog,
     QFileDialog,
@@ -13,6 +12,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from diffasaurus.core.paths import powershell_runtimes_dir
+from diffasaurus.core.powershell_environment import private_module_count
 from diffasaurus.core.powershell_runtime import (
     PowerShellRuntime,
     discover_powershell_runtimes,
@@ -28,6 +29,8 @@ from diffasaurus.core.powershell_runtime import (
     select_powershell_runtime,
     selected_powershell_runtime,
 )
+from diffasaurus.ui.background import BackgroundCall
+from diffasaurus.ui.powershell_environment import PowerShellEnvironmentDialog
 
 
 RUNTIME_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -40,6 +43,8 @@ class PowerShellManagerDialog(QDialog):
         self.resize(900, 500)
         self.runtimes: list[PowerShellRuntime] = []
         self.selected_runtime: PowerShellRuntime | None = None
+        self._tasks: set[BackgroundCall] = set()
+        self._refresh_generation = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
@@ -56,45 +61,70 @@ class PowerShellManagerDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ("Active", "Version", "Source", "Architecture", "Executable")
+            (
+                "Active",
+                "Version",
+                "Source",
+                "Architecture",
+                "Private modules",
+                "Executable",
+            )
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch
+            5, QHeaderView.ResizeMode.Stretch
         )
+        for column in range(5):
+            self.table.horizontalHeader().setSectionResizeMode(
+                column,
+                QHeaderView.ResizeMode.ResizeToContents,
+            )
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.table.itemDoubleClicked.connect(lambda _item: self.use_selected())
         layout.addWidget(self.table, 1)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color:#8295a8;")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.hide()
         layout.addWidget(self.status)
+        layout.addWidget(self.progress)
 
         tools = QHBoxLayout()
-        add = QPushButton("＋ Add portable folder")
-        add.clicked.connect(self.add_portable)
+        self.add = QPushButton("＋ Import portable pwsh")
+        self.add.clicked.connect(self.add_portable)
         self.remove = QPushButton("Remove portable")
         self.remove.clicked.connect(self.remove_portable)
-        open_folder = QPushButton("Open portable folder")
-        open_folder.clicked.connect(
+        self.environment = QPushButton("Modules && console")
+        self.environment.clicked.connect(self.open_environment)
+        self.open_folder = QPushButton("Open portable folder")
+        self.open_folder.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(powershell_runtimes_dir()))
             )
         )
-        downloads = QPushButton("PowerShell downloads")
-        downloads.clicked.connect(
+        self.downloads = QPushButton("PowerShell downloads")
+        self.downloads.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl("https://github.com/PowerShell/PowerShell/releases")
             )
         )
-        refresh = QPushButton("Rescan")
-        refresh.clicked.connect(self.refresh)
-        for button in (add, self.remove, open_folder, downloads, refresh):
+        self.rescan = QPushButton("Rescan")
+        self.rescan.clicked.connect(self.refresh)
+        for button in (
+            self.add,
+            self.remove,
+            self.environment,
+            self.open_folder,
+            self.downloads,
+            self.rescan,
+        ):
             tools.addWidget(button)
         tools.addStretch()
         layout.addLayout(tools)
@@ -111,12 +141,45 @@ class PowerShellManagerDialog(QDialog):
         layout.addLayout(actions)
         self.refresh()
 
-    def refresh(self, preferred: Path | None = None):
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.runtimes = discover_powershell_runtimes()
-        finally:
-            QApplication.restoreOverrideCursor()
+    def _start_background(self, function, on_success, *args):
+        task = BackgroundCall(function, *args)
+        self._tasks.add(task)
+        task.signals.succeeded.connect(on_success)
+        task.signals.failed.connect(self._operation_failed)
+        task.signals.done.connect(lambda: self._tasks.discard(task))
+        QThreadPool.globalInstance().start(task)
+
+    def _set_busy(self, busy: bool, message: str = ""):
+        self.progress.setVisible(busy)
+        for button in (self.add, self.remove, self.rescan, self.use):
+            button.setEnabled(not busy)
+        self.environment.setEnabled(not busy and self._current_runtime() is not None)
+        if message:
+            self.status.setText(message)
+
+    def refresh(self, preferred: Path | bool | None = None):
+        preferred_path = preferred if isinstance(preferred, Path) else None
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self._set_busy(True, "Scanning PowerShell installations in the background…")
+        self._start_background(
+            discover_powershell_runtimes,
+            lambda runtimes: self._runtimes_loaded(
+                list(runtimes),
+                preferred_path,
+                generation,
+            ),
+        )
+
+    def _runtimes_loaded(
+        self,
+        runtimes: list[PowerShellRuntime],
+        preferred: Path | None,
+        generation: int,
+    ):
+        if generation != self._refresh_generation:
+            return
+        self.runtimes = runtimes
         active = selected_powershell_runtime(self.runtimes)
         preferred_key = str(preferred.resolve()) if preferred else ""
         active_key = active.identity if active else ""
@@ -128,6 +191,7 @@ class PowerShellManagerDialog(QDialog):
                 runtime.version,
                 runtime.source,
                 runtime.architecture or "Unknown",
+                str(private_module_count(runtime)),
                 str(runtime.path),
             )
             for column, value in enumerate(values):
@@ -152,6 +216,7 @@ class PowerShellManagerDialog(QDialog):
             self.table.selectRow(selected_row)
         elif self.runtimes:
             self.table.selectRow(0)
+        self._set_busy(False)
         self.status.setText(
             f"{len(self.runtimes)} usable runtime{'s' if len(self.runtimes) != 1 else ''} detected."
             if self.runtimes
@@ -169,27 +234,36 @@ class PowerShellManagerDialog(QDialog):
         runtime = self._current_runtime()
         self.use.setEnabled(bool(runtime and runtime.supported))
         self.remove.setEnabled(bool(runtime and runtime.managed))
+        self.environment.setEnabled(bool(runtime and runtime.supported))
         if runtime and not runtime.supported:
             self.status.setText(
                 f"PowerShell {runtime.version} is detected but unsupported; version 7 or newer is required."
             )
 
     def add_portable(self):
-        folder = QFileDialog.getExistingDirectory(
+        executable, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            "Choose extracted portable PowerShell folder",
+            "Choose pwsh from the extracted portable PowerShell folder",
             str(Path.home() / "Downloads"),
+            "PowerShell executable (pwsh pwsh.exe);;All files (*)",
         )
-        if not folder:
+        if not executable:
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            runtime = import_portable_runtime(Path(folder))
-        except Exception as exc:
-            QMessageBox.warning(self, "Portable PowerShell", str(exc))
+        self._set_busy(
+            True,
+            "Importing and validating PowerShell in the background… "
+            "You can continue moving or repainting this window.",
+        )
+        self._start_background(
+            import_portable_runtime,
+            self._portable_imported,
+            Path(executable),
+        )
+
+    def _portable_imported(self, runtime):
+        if not isinstance(runtime, PowerShellRuntime):
+            self._operation_failed("The imported runtime result was invalid.")
             return
-        finally:
-            QApplication.restoreOverrideCursor()
         self.refresh(runtime.path)
         QMessageBox.information(
             self,
@@ -208,12 +282,25 @@ class PowerShellManagerDialog(QDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            remove_portable_runtime(runtime)
-        except Exception as exc:
-            QMessageBox.warning(self, "Remove portable PowerShell", str(exc))
+        self._set_busy(True, "Removing the portable runtime in the background…")
+        self._start_background(
+            remove_portable_runtime,
+            lambda _result: self.refresh(),
+            runtime,
+        )
+
+    def _operation_failed(self, message: str):
+        self._set_busy(False)
+        QMessageBox.warning(self, "PowerShell runtime", message)
+        self._selection_changed()
+
+    def open_environment(self):
+        runtime = self._current_runtime()
+        if runtime is None or not runtime.supported:
             return
-        self.refresh()
+        dialog = PowerShellEnvironmentDialog(runtime, self)
+        dialog.exec()
+        self.refresh(runtime.path)
 
     def use_selected(self):
         runtime = self._current_runtime()

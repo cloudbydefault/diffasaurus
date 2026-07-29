@@ -13,5 +13,6 @@ reports/*.csv
 !reports/.gitkeep
 pwsh/*
 !pwsh/.gitkeep
+powershell-environments/
 psmodules/*
 !psmodules/.gitkeep
