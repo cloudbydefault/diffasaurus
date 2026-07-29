@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from diffasaurus.core.paths import project_root, reports_dir
+from diffasaurus.core.paths import reports_dir, user_data_dir
 
 
 DEFAULT_SETTINGS = {
@@ -13,7 +13,7 @@ DEFAULT_SETTINGS = {
 
 
 def settings_path() -> Path:
-    path = project_root() / "config" / "settings.json"
+    path = user_data_dir() / "config" / "settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

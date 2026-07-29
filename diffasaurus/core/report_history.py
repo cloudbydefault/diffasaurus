@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from diffasaurus.core.dashboard_registry import get_dashboard_definition
-from diffasaurus.core.paths import project_root
+from diffasaurus.core.paths import user_data_dir
 from diffasaurus.models.csv_model import CsvTableModel
 
 
@@ -393,7 +393,11 @@ def _comparison_signature(
 
 def analysis_cache_path() -> Path:
     override = os.environ.get("DIFFASAURUS_ANALYSIS_CACHE")
-    return Path(override).expanduser() if override else project_root() / "config" / "analysis_cache.json"
+    return (
+        Path(override).expanduser()
+        if override
+        else user_data_dir() / "config" / "analysis_cache.json"
+    )
 
 
 def _load_persistent_cache_locked() -> None:
