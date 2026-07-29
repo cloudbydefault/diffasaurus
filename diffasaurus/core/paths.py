@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -14,8 +15,17 @@ def project_root() -> Path:
 
 
 def user_data_dir() -> Path:
-    if getattr(sys, "frozen", False) and sys.platform == "darwin":
-        path = Path.home() / "Library" / "Application Support" / "Diffasaurus"
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            path = Path.home() / "Library" / "Application Support" / "Diffasaurus"
+        elif sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+            path = base / "Diffasaurus"
+        else:
+            xdg_data = os.environ.get("XDG_DATA_HOME")
+            base = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
+            path = base / "Diffasaurus"
     else:
         path = project_root()
     path.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,9 @@ import csv
 import json
 import os
 import re
+import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -30,13 +32,12 @@ PREFERRED_KEYS = (
 )
 
 _ANALYSIS_CACHE: dict[
-    tuple[str, int, int],
+    tuple[str, str, str, int, int],
     tuple["ReportSnapshot", str, dict[str, float]],
 ] = {}
-_PERSISTENT_CACHE: dict[str, dict] = {"snapshots": {}, "comparisons": {}}
-_PERSISTENT_CACHE_SOURCE: Path | None = None
-_PERSISTENT_CACHE_DIRTY = False
 _CACHE_LOCK = threading.Lock()
+_CACHE_SCHEMA_VERSION = 1
+_INITIALIZED_CACHE_PATHS: set[Path] = set()
 
 
 @dataclass(frozen=True)
@@ -268,18 +269,27 @@ def _compare_snapshots(
     if not include_details:
         comparison_cache_key = _comparison_signature(baseline, latest, key_column)
         with _CACHE_LOCK:
-            _load_persistent_cache_locked()
-            cached = _PERSISTENT_CACHE["comparisons"].get(comparison_cache_key)
-        if isinstance(cached, dict):
+            try:
+                with _cache_connection_locked() as connection:
+                    cached = connection.execute(
+                        """
+                        SELECT added, removed, changed, stable
+                        FROM comparison_cache WHERE signature=?
+                        """,
+                        (comparison_cache_key,),
+                    ).fetchone()
+            except (OSError, sqlite3.Error):
+                cached = None
+        if cached is not None:
             try:
                 return ComparisonSummary(
-                    added=int(cached["added"]),
-                    removed=int(cached["removed"]),
-                    changed=int(cached["changed"]),
-                    stable=int(cached["stable"]),
+                    added=int(cached[0]),
+                    removed=int(cached[1]),
+                    changed=int(cached[2]),
+                    stable=int(cached[3]),
                     details=(),
                 )
-            except (KeyError, TypeError, ValueError):
+            except (TypeError, ValueError):
                 pass
 
     _, baseline_rows = read_csv_rows(baseline.path)
@@ -342,15 +352,25 @@ def _compare_snapshots(
         details=tuple(details),
     )
     if comparison_cache_key:
-        global _PERSISTENT_CACHE_DIRTY
         with _CACHE_LOCK:
-            _PERSISTENT_CACHE["comparisons"][comparison_cache_key] = {
-                "added": summary.added,
-                "removed": summary.removed,
-                "changed": summary.changed,
-                "stable": summary.stable,
-            }
-            _PERSISTENT_CACHE_DIRTY = True
+            try:
+                with _cache_connection_locked() as connection:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO comparison_cache(
+                            signature, added, removed, changed, stable, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            comparison_cache_key,
+                            summary.added,
+                            summary.removed,
+                            summary.changed,
+                            summary.stable,
+                        ),
+                    )
+            except (OSError, sqlite3.Error):
+                pass
     return summary
 
 
@@ -370,12 +390,18 @@ def compare_snapshot_counts(
     return _compare_snapshots(baseline, latest, key_column, include_details=False)
 
 
-def _snapshot_signature(snapshot: ReportSnapshot) -> tuple[str, int, int]:
+def _snapshot_signature(snapshot: ReportSnapshot) -> tuple[str, str, str, int, int]:
     stat = snapshot.path.stat()
-    return str(snapshot.path.resolve()), stat.st_size, stat.st_mtime_ns
+    return (
+        snapshot.path.name,
+        snapshot.family,
+        snapshot.captured_at.isoformat(),
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
 
 
-def _signature_key(signature: tuple[str, int, int]) -> str:
+def _signature_key(signature: tuple) -> str:
     return json.dumps(signature, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -392,51 +418,190 @@ def _comparison_signature(
 
 
 def analysis_cache_path() -> Path:
+    database_override = os.environ.get("DIFFASAURUS_CACHE_DB")
+    if database_override:
+        return Path(database_override).expanduser()
+    legacy_override = os.environ.get("DIFFASAURUS_ANALYSIS_CACHE")
+    if legacy_override:
+        candidate = Path(legacy_override).expanduser()
+        try:
+            if candidate.is_file():
+                with candidate.open("rb") as handle:
+                    if handle.read(1) == b"{":
+                        return candidate.with_suffix(".sqlite3")
+        except OSError:
+            pass
+        return candidate
+    return user_data_dir() / "config" / "history_cache.sqlite3"
+
+
+def _legacy_cache_path() -> Path:
     override = os.environ.get("DIFFASAURUS_ANALYSIS_CACHE")
-    return (
-        Path(override).expanduser()
-        if override
-        else user_data_dir() / "config" / "analysis_cache.json"
+    if override:
+        return Path(override).expanduser()
+    return user_data_dir() / "config" / "analysis_cache.json"
+
+
+def _open_cache_locked() -> sqlite3.Connection:
+    destination = analysis_cache_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    needs_initialization = (
+        destination not in _INITIALIZED_CACHE_PATHS or not destination.is_file()
     )
+    connection = sqlite3.connect(destination, timeout=15)
+    connection.execute("PRAGMA synchronous=NORMAL")
+    if needs_initialization:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS snapshot_cache (
+                signature TEXT PRIMARY KEY,
+                row_count INTEGER NOT NULL,
+                headers_json TEXT NOT NULL,
+                title TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS comparison_cache (
+                signature TEXT PRIMARY KEY,
+                added INTEGER NOT NULL,
+                removed INTEGER NOT NULL,
+                changed INTEGER NOT NULL,
+                stable INTEGER NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
+            (str(_CACHE_SCHEMA_VERSION),),
+        )
+        _migrate_legacy_cache_locked(connection, destination)
+        _INITIALIZED_CACHE_PATHS.add(destination)
+    return connection
 
 
-def _load_persistent_cache_locked() -> None:
-    global _PERSISTENT_CACHE, _PERSISTENT_CACHE_DIRTY, _PERSISTENT_CACHE_SOURCE
-    source = analysis_cache_path()
-    if _PERSISTENT_CACHE_SOURCE == source:
+@contextmanager
+def _cache_connection_locked():
+    connection = _open_cache_locked()
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _portable_legacy_snapshot_signature(raw_signature: str) -> str | None:
+    try:
+        path, size, modified = json.loads(raw_signature)
+        filename = Path(path).name
+        return _signature_key(
+            (
+                filename,
+                report_family(filename),
+                report_timestamp(Path(filename)).isoformat(),
+                int(size),
+                int(modified),
+            )
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _portable_legacy_comparison_signature(raw_signature: str) -> str | None:
+    try:
+        baseline, latest, key_column = json.loads(raw_signature)
+
+        def portable(parts) -> tuple[str, str, str, int, int]:
+            path, size, modified = parts
+            filename = Path(path).name
+            return (
+                filename,
+                report_family(filename),
+                report_timestamp(Path(filename)).isoformat(),
+                int(size),
+                int(modified),
+            )
+
+        return _signature_key((portable(baseline), portable(latest), key_column))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _migrate_legacy_cache_locked(
+    connection: sqlite3.Connection,
+    destination: Path,
+) -> None:
+    migrated = connection.execute(
+        "SELECT value FROM metadata WHERE key='legacy_json_migrated'"
+    ).fetchone()
+    if migrated:
+        return
+    legacy = _legacy_cache_path()
+    if legacy == destination or not legacy.is_file():
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('legacy_json_migrated', 'none')"
+        )
+        connection.commit()
         return
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
+        payload = json.loads(legacy.read_text(encoding="utf-8"))
         snapshots = payload.get("snapshots", {})
         comparisons = payload.get("comparisons", {})
         if not isinstance(snapshots, dict) or not isinstance(comparisons, dict):
-            raise ValueError("Invalid cache structure")
-        _PERSISTENT_CACHE = {"snapshots": snapshots, "comparisons": comparisons}
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        _PERSISTENT_CACHE = {"snapshots": {}, "comparisons": {}}
-    _PERSISTENT_CACHE_SOURCE = source
-    _PERSISTENT_CACHE_DIRTY = False
+            raise ValueError("Invalid legacy cache")
+        for raw_signature, cached in snapshots.items():
+            signature = _portable_legacy_snapshot_signature(raw_signature)
+            if not signature or not isinstance(cached, dict):
+                continue
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO snapshot_cache(
+                    signature, row_count, headers_json, title, metrics_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    signature,
+                    int(cached["row_count"]),
+                    json.dumps(cached["headers"], ensure_ascii=False),
+                    str(cached["title"]),
+                    json.dumps(cached["metrics"], ensure_ascii=False),
+                ),
+            )
+        for raw_signature, cached in comparisons.items():
+            signature = _portable_legacy_comparison_signature(raw_signature)
+            if not signature or not isinstance(cached, dict):
+                continue
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO comparison_cache(
+                    signature, added, removed, changed, stable
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    signature,
+                    int(cached["added"]),
+                    int(cached["removed"]),
+                    int(cached["changed"]),
+                    int(cached["stable"]),
+                ),
+            )
+        migration_result = "complete"
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        migration_result = "invalid"
+    connection.execute(
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('legacy_json_migrated', ?)",
+        (migration_result,),
+    )
+    connection.commit()
 
 
 def save_analysis_cache() -> None:
-    """Persist reusable metrics after a batch without delaying every snapshot."""
-    global _PERSISTENT_CACHE_DIRTY
-    with _CACHE_LOCK:
-        _load_persistent_cache_locked()
-        if not _PERSISTENT_CACHE_DIRTY:
-            return
-        destination = analysis_cache_path()
-        temporary = destination.with_suffix(".tmp")
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(
-                json.dumps(_PERSISTENT_CACHE, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            temporary.replace(destination)
-        except OSError:
-            return
-        _PERSISTENT_CACHE_DIRTY = False
+    """Compatibility hook; SQLite entries are committed incrementally."""
 
 
 def analyze_snapshot(
@@ -445,30 +610,40 @@ def analyze_snapshot(
     signature = _snapshot_signature(snapshot)
     signature_key = _signature_key(signature)
     with _CACHE_LOCK:
-        _load_persistent_cache_locked()
         cached = _ANALYSIS_CACHE.get(signature)
-        persistent = _PERSISTENT_CACHE["snapshots"].get(signature_key)
     if cached is not None:
         hydrated, title, metrics = cached
         return hydrated, title, metrics.copy()
-    if isinstance(persistent, dict):
+    with _CACHE_LOCK:
         try:
+            with _cache_connection_locked() as connection:
+                persistent = connection.execute(
+                    """
+                    SELECT row_count, headers_json, title, metrics_json
+                    FROM snapshot_cache WHERE signature=?
+                    """,
+                    (signature_key,),
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            persistent = None
+    if persistent is not None:
+        try:
+            row_count, headers_json, title, metrics_json = persistent
             hydrated = ReportSnapshot(
                 path=snapshot.path,
                 family=snapshot.family,
                 captured_at=snapshot.captured_at,
-                row_count=int(persistent["row_count"]),
-                headers=tuple(str(header) for header in persistent["headers"]),
+                row_count=int(row_count),
+                headers=tuple(str(header) for header in json.loads(headers_json)),
             )
-            title = str(persistent["title"])
             metrics = {
                 str(name): float(value)
-                for name, value in persistent["metrics"].items()
+                for name, value in json.loads(metrics_json).items()
             }
             with _CACHE_LOCK:
-                _ANALYSIS_CACHE[signature] = (hydrated, title, metrics.copy())
-            return hydrated, title, metrics
-        except (KeyError, TypeError, ValueError):
+                _ANALYSIS_CACHE[signature] = (hydrated, str(title), metrics.copy())
+            return hydrated, str(title), metrics
+        except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
     model = CsvTableModel()
@@ -488,16 +663,26 @@ def analyze_snapshot(
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             metrics[str(stat.get("title", "Metric"))] = float(value)
     detected_title = title or snapshot.family
-    global _PERSISTENT_CACHE_DIRTY
     with _CACHE_LOCK:
         _ANALYSIS_CACHE[signature] = (hydrated, detected_title, metrics.copy())
-        _PERSISTENT_CACHE["snapshots"][signature_key] = {
-            "row_count": hydrated.row_count,
-            "headers": list(hydrated.headers),
-            "title": detected_title,
-            "metrics": metrics,
-        }
-        _PERSISTENT_CACHE_DIRTY = True
+        try:
+            with _cache_connection_locked() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO snapshot_cache(
+                        signature, row_count, headers_json, title, metrics_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        signature_key,
+                        hydrated.row_count,
+                        json.dumps(list(hydrated.headers), ensure_ascii=False),
+                        detected_title,
+                        json.dumps(metrics, ensure_ascii=False),
+                    ),
+                )
+        except (OSError, sqlite3.Error):
+            pass
     return hydrated, detected_title, metrics
 
 
@@ -516,6 +701,83 @@ def history_metrics(
         title = detected_title
         history.append((hydrated, metrics))
     return title, history
+
+
+def filter_history_by_days(
+    history: list[tuple[ReportSnapshot, dict[str, float]]],
+    days: int | None,
+) -> list[tuple[ReportSnapshot, dict[str, float]]]:
+    """Return a trailing date window anchored to the newest available snapshot."""
+    if not history or days is None:
+        return list(history)
+    cutoff = history[-1][0].captured_at - timedelta(days=days)
+    return [entry for entry in history if entry[0].captured_at >= cutoff]
+
+
+def metric_series(
+    history: list[tuple[ReportSnapshot, dict[str, float]]],
+    metric: str,
+    days: int | None = None,
+    aggregation: str = "auto",
+    max_daily_points: int = 140,
+) -> tuple[list[float], list[str], str, int]:
+    """Build a readable stock-metric series, keeping the last value per period."""
+    filtered = filter_history_by_days(history, days)
+    points = [
+        (snapshot.captured_at, float(metrics[metric]))
+        for snapshot, metrics in filtered
+        if metric in metrics
+    ]
+    if not points:
+        return [], [], "daily", 0
+
+    effective = aggregation.lower()
+    if effective == "auto":
+        span_days = max((points[-1][0] - points[0][0]).days, 0)
+        if len(points) <= max_daily_points:
+            effective = "daily"
+        elif span_days <= 730:
+            effective = "weekly"
+        else:
+            effective = "monthly"
+    if effective not in {"daily", "weekly", "monthly"}:
+        raise ValueError(f"Unknown history aggregation: {aggregation}")
+
+    selected = points
+    if effective != "daily":
+        buckets: dict[tuple[int, ...], tuple[datetime, float]] = {}
+        for captured_at, value in points:
+            if effective == "weekly":
+                iso = captured_at.isocalendar()
+                bucket = (iso.year, iso.week)
+            else:
+                bucket = (captured_at.year, captured_at.month)
+            buckets[bucket] = (captured_at, value)
+        selected = list(buckets.values())
+
+    label_format = "%d %b" if effective != "monthly" else "%b %y"
+    return (
+        [value for _captured_at, value in selected],
+        [captured_at.strftime(label_format) for captured_at, _value in selected],
+        effective,
+        len(points),
+    )
+
+
+def schema_changes(
+    snapshots: list[ReportSnapshot],
+) -> list[tuple[datetime, tuple[str, ...], tuple[str, ...]]]:
+    """Describe adjacent header changes so long histories expose schema drift."""
+    changes = []
+    hydrated = [snapshot for snapshot in snapshots if snapshot.headers]
+    for baseline, latest in zip(hydrated[:-1], hydrated[1:]):
+        before = set(baseline.headers)
+        after = set(latest.headers)
+        added = tuple(header for header in latest.headers if header not in before)
+        removed = tuple(header for header in baseline.headers if header not in after)
+        if added or removed:
+            changes.append((latest.captured_at, added, removed))
+    return changes
 
 
 def recent_movement(

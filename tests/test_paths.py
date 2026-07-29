@@ -32,6 +32,21 @@ class PackagedPathTests(unittest.TestCase):
                     home / "Library" / "Application Support" / "Diffasaurus",
                 )
 
+    def test_windows_bundle_uses_local_app_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local_app_data = Path(directory) / "LocalAppData"
+            executable = Path(directory) / "Diffasaurus" / "Diffasaurus.exe"
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "platform", "win32"),
+                patch.object(sys, "executable", str(executable)),
+                patch.dict("os.environ", {"LOCALAPPDATA": str(local_app_data)}),
+            ):
+                self.assertEqual(
+                    user_data_dir(),
+                    local_app_data / "Diffasaurus",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

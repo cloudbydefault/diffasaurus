@@ -49,10 +49,14 @@ Large synchronized libraries are indexed lazily: Diffasaurus first reads only
 filenames and timestamps, then analyzes the selected report family on a
 background thread. The interface remains usable while OneDrive retrieves any
 online-only files, with live progress for indexing and analysis. Completed
-snapshot metrics and recent comparison counts are cached on disk and reused
-after restarting Diffasaurus; a CSV is analyzed again automatically when its
-size or modification time changes. For the fastest first analysis of a family,
-mark its CSV files as **Always keep on this device** in OneDrive.
+snapshot metrics and recent comparison counts are stored incrementally in a
+local SQLite cache and reused after restarting Diffasaurus or relocating the
+report folder; a CSV is analyzed again automatically when its size or
+modification time changes. Long timelines can be limited to a trailing date
+range and automatically summarized by week or month, while current-value cards
+continue to use the original snapshot values. Schema changes are highlighted
+alongside the timeline. For the fastest first analysis of a family, mark its CSV
+files as **Always keep on this device** in OneDrive.
 
 File names must end in a timestamp such as:
 
@@ -82,6 +86,22 @@ pyinstaller --clean Diffasaurus.spec
 
 The result is created in `dist/Diffasaurus/`. Build separately on macOS
 and Windows; PyInstaller applications are platform-specific.
+
+### Windows portable archive
+
+Run the Windows build from PowerShell:
+
+```powershell
+./scripts/build_windows.ps1
+```
+
+The resulting archive is written to
+`release/Diffasaurus-0.1.0-Windows-x64.zip`. Packaged Windows builds keep
+settings, caches, generated reports, and portable modules under
+`%LOCALAPPDATA%\Diffasaurus`. The GitHub Actions workflow named
+**Windows portable build** can also be started manually and uploads the archive
+as a workflow artifact. Signing is intentionally deferred for the preview
+phase.
 
 ### macOS disk image
 

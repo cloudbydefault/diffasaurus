@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
@@ -81,8 +83,11 @@ class LineChart(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._accent)
-        for point in points:
-            painter.drawEllipse(point, 4.5, 4.5)
+        marker_step = max(1, math.ceil(len(points) / 140))
+        marker_indexes = set(range(0, len(points), marker_step))
+        marker_indexes.add(len(points) - 1)
+        for index in sorted(marker_indexes):
+            painter.drawEllipse(points[index], 4.5, 4.5)
 
         label_indexes = sorted({0, count // 2, count - 1})
         painter.setPen(QColor("#8195a8"))
