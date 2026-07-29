@@ -20,7 +20,10 @@ from PyQt6.QtWidgets import (
 )
 
 from diffasaurus.core.paths import powershell_runtimes_dir
-from diffasaurus.core.powershell_environment import private_module_count
+from diffasaurus.core.powershell_environment import (
+    list_installed_modules,
+    private_module_count,
+)
 from diffasaurus.core.powershell_runtime import (
     PowerShellRuntime,
     discover_powershell_runtimes,
@@ -34,6 +37,18 @@ from diffasaurus.ui.powershell_environment import PowerShellEnvironmentDialog
 
 
 RUNTIME_ROLE = int(Qt.ItemDataRole.UserRole)
+
+
+def discover_runtime_inventory() -> list[tuple[PowerShellRuntime, int, int]]:
+    """Discover runtimes and both module counts in one background lifecycle."""
+    return [
+        (
+            runtime,
+            private_module_count(runtime),
+            len(list_installed_modules(runtime)),
+        )
+        for runtime in discover_powershell_runtimes()
+    ]
 
 
 class PowerShellManagerDialog(QDialog):
@@ -61,14 +76,15 @@ class PowerShellManagerDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             (
                 "Active",
                 "Version",
                 "Source",
                 "Architecture",
-                "Private modules",
+                "Isolated",
+                "Installed",
                 "Executable",
             )
         )
@@ -77,9 +93,9 @@ class PowerShellManagerDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch
+            6, QHeaderView.ResizeMode.Stretch
         )
-        for column in range(5):
+        for column in range(6):
             self.table.horizontalHeader().setSectionResizeMode(
                 column,
                 QHeaderView.ResizeMode.ResizeToContents,
@@ -163,9 +179,9 @@ class PowerShellManagerDialog(QDialog):
         generation = self._refresh_generation
         self._set_busy(True, "Scanning PowerShell installations in the background…")
         self._start_background(
-            discover_powershell_runtimes,
-            lambda runtimes: self._runtimes_loaded(
-                list(runtimes),
+            discover_runtime_inventory,
+            lambda inventory: self._runtimes_loaded(
+                list(inventory),
                 preferred_path,
                 generation,
             ),
@@ -173,25 +189,26 @@ class PowerShellManagerDialog(QDialog):
 
     def _runtimes_loaded(
         self,
-        runtimes: list[PowerShellRuntime],
+        inventory: list[tuple[PowerShellRuntime, int, int]],
         preferred: Path | None,
         generation: int,
     ):
         if generation != self._refresh_generation:
             return
-        self.runtimes = runtimes
+        self.runtimes = [runtime for runtime, _isolated, _installed in inventory]
         active = selected_powershell_runtime(self.runtimes)
         preferred_key = str(preferred.resolve()) if preferred else ""
         active_key = active.identity if active else ""
         self.table.setRowCount(len(self.runtimes))
         selected_row = -1
-        for row, runtime in enumerate(self.runtimes):
+        for row, (runtime, isolated_count, installed_count) in enumerate(inventory):
             values = (
                 "●" if runtime.identity == active_key else "",
                 runtime.version,
                 runtime.source,
                 runtime.architecture or "Unknown",
-                str(private_module_count(runtime)),
+                str(isolated_count),
+                str(installed_count),
                 str(runtime.path),
             )
             for column, value in enumerate(values):
@@ -205,6 +222,16 @@ class PowerShellManagerDialog(QDialog):
                     )
                 if column == 1 and not runtime.supported:
                     item.setToolTip("Diffasaurus requires PowerShell 7 or newer.")
+                elif column == 4:
+                    item.setToolTip(
+                        "Independent modules available to Diffasaurus reports "
+                        "for this exact runtime."
+                    )
+                elif column == 5:
+                    item.setToolTip(
+                        "User and machine modules visible to this PowerShell "
+                        "outside Diffasaurus. Built-in modules are excluded."
+                    )
                 item.setData(RUNTIME_ROLE, runtime)
                 self.table.setItem(row, column, item)
             if runtime.identity == preferred_key or (

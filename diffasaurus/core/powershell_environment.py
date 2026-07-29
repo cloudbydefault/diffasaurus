@@ -86,6 +86,9 @@ def powershell_environment(
         {
             "DIFFASAURUS_PS_MODULE_PATH": isolated_module_path(runtime),
             "DIFFASAURUS_MODULE_ROOT": str(runtime_modules_dir(runtime)),
+            "DIFFASAURUS_BUILTIN_MODULE_ROOT": str(
+                runtime_builtin_modules_dir(runtime)
+            ),
             "DIFFASAURUS_PS_MODULE_CACHE": str(
                 environment_root / "ModuleAnalysisCache"
             ),
@@ -101,20 +104,15 @@ def powershell_environment(
 
 def private_module_count(runtime: PowerShellRuntime) -> int:
     root = runtime_modules_dir(runtime)
-    return sum(1 for path in root.iterdir() if path.is_dir())
-
-
-def list_private_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
-    root = runtime_modules_dir(runtime).resolve()
-    script = (
-        ISOLATION_PREAMBLE
-        + "$root = [IO.Path]::GetFullPath($env:DIFFASAURUS_MODULE_ROOT);"
-        "Get-Module -ListAvailable | "
-        "Where-Object { [IO.Path]::GetFullPath($_.ModuleBase).StartsWith($root) } | "
-        "Sort-Object Name,Version -Unique | "
-        "Select-Object Name,@{n='Version';e={$_.Version.ToString()}},ModuleBase | "
-        "ConvertTo-Json -Compress"
+    return sum(
+        1 for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
     )
+
+
+def _module_inventory(
+    runtime: PowerShellRuntime,
+    script: str,
+) -> list[PowerShellModule]:
     try:
         result = subprocess.run(
             (
@@ -128,7 +126,7 @@ def list_private_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
             env=powershell_environment(runtime),
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=30,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -144,9 +142,7 @@ def list_private_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
     modules: list[PowerShellModule] = []
     for value in values if isinstance(values, list) else []:
         path = Path(str(value.get("ModuleBase", "")))
-        try:
-            path.resolve().relative_to(root)
-        except (OSError, ValueError):
+        if not path:
             continue
         modules.append(
             PowerShellModule(
@@ -156,6 +152,94 @@ def list_private_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
             )
         )
     return modules
+
+
+def _inventory_script(prefix: str = "") -> str:
+    return (
+        prefix
+        + "Get-Module -ListAvailable | "
+        "Sort-Object Name,Version -Unique | "
+        "Select-Object Name,@{n='Version';e={$_.Version.ToString()}},ModuleBase | "
+        "ConvertTo-Json -Compress"
+    )
+
+
+def list_private_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
+    root = runtime_modules_dir(runtime).resolve()
+    modules = _module_inventory(runtime, _inventory_script(ISOLATION_PREAMBLE))
+    private: list[PowerShellModule] = []
+    for module in modules:
+        try:
+            module.path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        private.append(module)
+    return private
+
+
+def list_installed_modules(runtime: PowerShellRuntime) -> list[PowerShellModule]:
+    """Return user/machine modules visible natively to this executable.
+
+    PowerShell's built-in modules and Diffasaurus's isolated modules are excluded,
+    so this inventory describes reusable modules installed outside Diffasaurus.
+    """
+    private_root = runtime_modules_dir(runtime).resolve()
+    builtin_root = runtime_builtin_modules_dir(runtime).resolve()
+    installed: list[PowerShellModule] = []
+    seen: set[tuple[str, str, str]] = set()
+    for module in _module_inventory(runtime, _inventory_script()):
+        try:
+            resolved = module.path.resolve()
+        except OSError:
+            continue
+        if resolved == private_root or private_root in resolved.parents:
+            continue
+        if resolved == builtin_root or builtin_root in resolved.parents:
+            continue
+        key = (module.name.casefold(), module.version, str(resolved))
+        if key in seen:
+            continue
+        seen.add(key)
+        installed.append(module)
+    return installed
+
+
+def copy_installed_modules(
+    runtime: PowerShellRuntime,
+    modules: list[PowerShellModule],
+) -> int:
+    """Copy selected native modules into this runtime's isolated environment."""
+    private_root = runtime_modules_dir(runtime).resolve()
+    copied = 0
+    for module in modules:
+        source = module.path.resolve()
+        if not source.is_dir():
+            continue
+        try:
+            source.relative_to(private_root)
+        except ValueError:
+            pass
+        else:
+            continue
+        name = _safe_name(module.name)
+        version = _safe_name(module.version or "unversioned")
+        parent = private_root / name
+        destination = parent / version
+        if destination.exists():
+            continue
+        parent.mkdir(parents=True, exist_ok=True)
+        temporary = parent / f".{version}.copying"
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        try:
+            shutil.copytree(source, temporary)
+            temporary.rename(destination)
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+        copied += 1
+    return copied
 
 
 def remove_private_module(
