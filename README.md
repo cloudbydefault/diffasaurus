@@ -82,9 +82,16 @@ selected runtime is remembered.
 
 Every runtime has its own private module directory and analysis cache. Normal
 CurrentUser, AllUsers, and other-version module locations are deliberately
-hidden during report execution. Open **Modules & console** to:
+hidden during report execution. The runtime manager reports both **Isolated**
+modules available to Diffasaurus and **Installed** modules detected in normal
+PowerShell user and machine locations. Built-in modules are excluded from both
+counts because they are always supplied by the selected runtime.
+
+Open **Modules & console** to:
 
 - inspect and remove modules belonging only to the selected runtime;
+- inspect modules already installed for that PowerShell and copy selected
+  versions—or the complete inventory—into its isolated environment;
 - install a specific module and optional exact version;
 - install the Microsoft Graph and Exchange Online report modules; and
 - use a persistent embedded console backed by the exact selected `pwsh`.

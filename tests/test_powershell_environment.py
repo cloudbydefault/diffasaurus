@@ -9,7 +9,10 @@ from unittest.mock import patch
 from diffasaurus.core.powershell_environment import (
     ISOLATION_PREAMBLE,
     REPORT_COMMAND,
+    PowerShellModule,
+    copy_installed_modules,
     isolated_module_path,
+    list_installed_modules,
     powershell_environment,
     runtime_environment_dir,
     runtime_modules_dir,
@@ -66,6 +69,58 @@ class PowerShellEnvironmentTests(unittest.TestCase):
             self.assertTrue(
                 values["PSModuleAnalysisCachePath"].startswith(str(environment_root))
             )
+
+    def test_installed_inventory_excludes_builtin_and_isolated_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "runtime" / "pwsh"
+            executable.parent.mkdir()
+            executable.touch()
+            runtime = PowerShellRuntime(executable, "7.5.4", "System", "Arm64")
+            native = root / "native" / "Example" / "1.2.3"
+            native.mkdir(parents=True)
+            with patch(
+                "diffasaurus.core.powershell_environment.powershell_environments_dir",
+                return_value=root / "environments",
+            ):
+                private = runtime_modules_dir(runtime) / "Private" / "1.0.0"
+                builtin = executable.parent / "Modules" / "BuiltIn"
+                private.mkdir(parents=True)
+                builtin.mkdir(parents=True)
+                inventory = [
+                    PowerShellModule("Example", "1.2.3", native),
+                    PowerShellModule("Private", "1.0.0", private),
+                    PowerShellModule("BuiltIn", "7.0.0", builtin),
+                ]
+                with patch(
+                    "diffasaurus.core.powershell_environment._module_inventory",
+                    return_value=inventory,
+                ):
+                    installed = list_installed_modules(runtime)
+
+            self.assertEqual(installed, [inventory[0]])
+
+    def test_native_module_copy_creates_an_independent_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "native" / "Example" / "1.2.3"
+            source.mkdir(parents=True)
+            (source / "Example.psd1").write_text("module", encoding="utf-8")
+            runtime = PowerShellRuntime(root / "pwsh", "7.5.4", "System", "Arm64")
+            module = PowerShellModule("Example", "1.2.3", source)
+            with patch(
+                "diffasaurus.core.powershell_environment.powershell_environments_dir",
+                return_value=root / "environments",
+            ):
+                copied = copy_installed_modules(runtime, [module])
+                destination = runtime_modules_dir(runtime) / "Example" / "1.2.3"
+
+            self.assertEqual(copied, 1)
+            self.assertEqual(
+                (destination / "Example.psd1").read_text(encoding="utf-8"),
+                "module",
+            )
+            self.assertNotEqual(source, destination)
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_live_session_cannot_see_normal_user_module_path_after_bootstrap(self):

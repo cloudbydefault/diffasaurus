@@ -20,7 +20,10 @@ from PyQt6.QtWidgets import (
 )
 
 from diffasaurus.core.paths import powershell_runtimes_dir
-from diffasaurus.core.powershell_environment import private_module_count
+from diffasaurus.core.powershell_environment import (
+    list_installed_modules,
+    private_module_count,
+)
 from diffasaurus.core.powershell_runtime import (
     PowerShellRuntime,
     discover_powershell_runtimes,
@@ -61,14 +64,15 @@ class PowerShellManagerDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             (
                 "Active",
                 "Version",
                 "Source",
                 "Architecture",
-                "Private modules",
+                "Isolated",
+                "Installed",
                 "Executable",
             )
         )
@@ -77,9 +81,9 @@ class PowerShellManagerDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch
+            6, QHeaderView.ResizeMode.Stretch
         )
-        for column in range(5):
+        for column in range(6):
             self.table.horizontalHeader().setSectionResizeMode(
                 column,
                 QHeaderView.ResizeMode.ResizeToContents,
@@ -192,6 +196,7 @@ class PowerShellManagerDialog(QDialog):
                 runtime.source,
                 runtime.architecture or "Unknown",
                 str(private_module_count(runtime)),
+                "Scanning…",
                 str(runtime.path),
             )
             for column, value in enumerate(values):
@@ -205,8 +210,24 @@ class PowerShellManagerDialog(QDialog):
                     )
                 if column == 1 and not runtime.supported:
                     item.setToolTip("Diffasaurus requires PowerShell 7 or newer.")
+                elif column == 4:
+                    item.setToolTip(
+                        "Independent modules available to Diffasaurus reports "
+                        "for this exact runtime."
+                    )
+                elif column == 5:
+                    item.setToolTip(
+                        "Scanning user and machine module locations…"
+                    )
                 item.setData(RUNTIME_ROLE, runtime)
                 self.table.setItem(row, column, item)
+            self._start_background(
+                list_installed_modules,
+                lambda modules, identity=runtime.identity: self._installed_modules_loaded(
+                    identity, len(modules)
+                ),
+                runtime,
+            )
             if runtime.identity == preferred_key or (
                 selected_row < 0 and runtime.identity == active_key
             ):
@@ -223,6 +244,20 @@ class PowerShellManagerDialog(QDialog):
             else "No usable PowerShell runtime detected. Add an extracted portable PowerShell folder."
         )
         self._selection_changed()
+
+    def _installed_modules_loaded(self, identity: str, count: int):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            runtime = item.data(RUNTIME_ROLE) if item else None
+            if isinstance(runtime, PowerShellRuntime) and runtime.identity == identity:
+                count_item = self.table.item(row, 5)
+                if count_item is not None:
+                    count_item.setText(str(count))
+                    count_item.setToolTip(
+                        "User and machine modules visible to this PowerShell "
+                        "outside Diffasaurus. Built-in modules are excluded."
+                    )
+                return
 
     def _current_runtime(self) -> PowerShellRuntime | None:
         row = self.table.currentRow()

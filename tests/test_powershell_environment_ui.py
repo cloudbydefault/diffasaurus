@@ -102,6 +102,48 @@ class PowerShellEnvironmentUiTests(unittest.TestCase):
             self.app.processEvents()
             dialog.close()
 
+    def test_installed_module_inventory_updates_in_the_background(self):
+        runtime = PowerShellRuntime(
+            Path("/tmp/system/pwsh"),
+            "7.5.4",
+            "System",
+            "Arm64",
+        )
+        modules = [
+            object(),
+            object(),
+        ]
+
+        def slow_inventory(_runtime):
+            time.sleep(0.2)
+            return modules
+
+        with (
+            patch(
+                "diffasaurus.ui.powershell_manager.discover_powershell_runtimes",
+                return_value=[runtime],
+            ),
+            patch(
+                "diffasaurus.ui.powershell_manager.selected_powershell_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "diffasaurus.ui.powershell_manager.list_installed_modules",
+                side_effect=slow_inventory,
+            ),
+        ):
+            dialog = PowerShellManagerDialog()
+            dialog.show()
+            self.assertTrue(
+                self._wait_for(lambda: dialog.table.rowCount() == 1)
+            )
+            self.assertEqual(dialog.table.item(0, 5).text(), "Scanning…")
+            self.assertTrue(
+                self._wait_for(lambda: dialog.table.item(0, 5).text() == "2")
+            )
+            dialog.close()
+            QThreadPool.globalInstance().waitForDone(2_000)
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_embedded_console_is_persistent_and_isolated(self):
         runtime = probe_powershell_runtime(Path(shutil.which("pwsh")), "System")

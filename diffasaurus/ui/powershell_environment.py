@@ -26,6 +26,8 @@ from PyQt6.QtWidgets import (
 from diffasaurus.core.powershell_environment import (
     ISOLATION_PREAMBLE,
     PowerShellModule,
+    copy_installed_modules,
+    list_installed_modules,
     list_private_modules,
     powershell_environment,
     remove_private_module,
@@ -85,6 +87,7 @@ class PowerShellEnvironmentDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.modules: list[PowerShellModule] = []
+        self.installed_modules: list[PowerShellModule] = []
         self._tasks: set[BackgroundCall] = set()
         self._install_queue: list[tuple[str, str]] = []
         self.setWindowTitle(f"PowerShell {runtime.version} environment")
@@ -106,7 +109,8 @@ class PowerShellEnvironmentDialog(QDialog):
         layout.addWidget(details)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_modules_tab(), "Private modules")
+        self.tabs.addTab(self._build_modules_tab(), "Isolated modules")
+        self.tabs.addTab(self._build_installed_modules_tab(), "Installed modules")
         self.tabs.addTab(self._build_console_tab(), "PowerShell console")
         layout.addWidget(self.tabs, 1)
 
@@ -212,6 +216,66 @@ class PowerShellEnvironmentDialog(QDialog):
         layout.addWidget(self.install_output)
         return tab
 
+    def _build_installed_modules_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 12, 0, 0)
+        explanation = QLabel(
+            "These modules are installed in normal CurrentUser or AllUsers "
+            "locations and are visible when this PowerShell runs outside "
+            "Diffasaurus. Copying creates an independent version for reports "
+            "without changing the original installation."
+        )
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet("color:#8295a8;")
+        layout.addWidget(explanation)
+
+        self.installed_table = QTableWidget(0, 3)
+        self.installed_table.setHorizontalHeaderLabels(
+            ("Module", "Version", "Native location")
+        )
+        self.installed_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.installed_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.installed_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.installed_table.verticalHeader().setVisible(False)
+        self.installed_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.installed_table.itemSelectionChanged.connect(
+            self._installed_selection_changed
+        )
+        layout.addWidget(self.installed_table, 1)
+
+        self.installed_status = QLabel("")
+        self.installed_status.setStyleSheet("color:#8295a8;")
+        self.installed_progress = QProgressBar()
+        self.installed_progress.setRange(0, 0)
+        self.installed_progress.hide()
+        layout.addWidget(self.installed_status)
+        layout.addWidget(self.installed_progress)
+
+        actions = QHBoxLayout()
+        self.copy_selected_button = QPushButton("Copy selected to isolated")
+        self.copy_selected_button.clicked.connect(self.copy_selected_installed)
+        self.copy_selected_button.setEnabled(False)
+        self.copy_all_button = QPushButton("Copy all to isolated")
+        self.copy_all_button.clicked.connect(self.copy_all_installed)
+        self.copy_all_button.setEnabled(False)
+        self.refresh_installed_button = QPushButton("Refresh")
+        self.refresh_installed_button.clicked.connect(self.refresh_installed_modules)
+        actions.addWidget(self.copy_selected_button)
+        actions.addWidget(self.copy_all_button)
+        actions.addWidget(self.refresh_installed_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        return tab
+
     def _build_console_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -269,6 +333,21 @@ class PowerShellEnvironmentDialog(QDialog):
             self._modules_loaded,
             self.runtime,
         )
+        self.refresh_installed_modules()
+
+    def refresh_installed_modules(self):
+        self.refresh_installed_button.setEnabled(False)
+        self.copy_selected_button.setEnabled(False)
+        self.copy_all_button.setEnabled(False)
+        self.installed_progress.show()
+        self.installed_status.setText(
+            "Scanning modules installed outside Diffasaurus…"
+        )
+        self._start_background(
+            list_installed_modules,
+            self._installed_modules_loaded,
+            self.runtime,
+        )
 
     def _modules_loaded(self, value):
         self.modules = list(value)
@@ -289,14 +368,45 @@ class PowerShellEnvironmentDialog(QDialog):
         )
         self._module_selection_changed()
 
+    def _installed_modules_loaded(self, value):
+        self.installed_modules = list(value)
+        self.installed_table.setRowCount(len(self.installed_modules))
+        for row, module in enumerate(self.installed_modules):
+            for column, text in enumerate(
+                (module.name, module.version, str(module.path))
+            ):
+                item = QTableWidgetItem(text)
+                item.setData(MODULE_ROLE, module)
+                self.installed_table.setItem(row, column, item)
+        self.installed_progress.hide()
+        self.refresh_installed_button.setEnabled(True)
+        self.copy_all_button.setEnabled(bool(self.installed_modules))
+        self.installed_status.setText(
+            f"{len(self.installed_modules)} installed module version"
+            f"{'s' if len(self.installed_modules) != 1 else ''} detected outside "
+            "Diffasaurus. Built-in PowerShell modules are not included."
+        )
+        self._installed_selection_changed()
+
     def _background_failed(self, message: str):
         self.module_progress.hide()
+        self.installed_progress.hide()
         self.refresh_button.setEnabled(True)
+        self.refresh_installed_button.setEnabled(True)
+        self.copy_all_button.setEnabled(bool(self.installed_modules))
         self.module_status.setText(message)
+        self.installed_status.setText(message)
+        self._installed_selection_changed()
 
     def _current_module(self) -> PowerShellModule | None:
         row = self.module_table.currentRow()
         item = self.module_table.item(row, 0) if row >= 0 else None
+        module = item.data(MODULE_ROLE) if item else None
+        return module if isinstance(module, PowerShellModule) else None
+
+    def _current_installed_module(self) -> PowerShellModule | None:
+        row = self.installed_table.currentRow()
+        item = self.installed_table.item(row, 0) if row >= 0 else None
         module = item.data(MODULE_ROLE) if item else None
         return module if isinstance(module, PowerShellModule) else None
 
@@ -305,6 +415,54 @@ class PowerShellEnvironmentDialog(QDialog):
             self._current_module() is not None
             and self.install_process.state() == QProcess.ProcessState.NotRunning
         )
+
+    def _installed_selection_changed(self):
+        self.copy_selected_button.setEnabled(
+            self._current_installed_module() is not None
+            and not self.installed_progress.isVisible()
+        )
+
+    def copy_selected_installed(self):
+        module = self._current_installed_module()
+        if module is not None:
+            self._copy_installed([module])
+
+    def copy_all_installed(self):
+        if self.installed_modules:
+            self._copy_installed(self.installed_modules)
+
+    def _copy_installed(self, modules: list[PowerShellModule]):
+        noun = (
+            f"{modules[0].name} {modules[0].version}"
+            if len(modules) == 1
+            else f"all {len(modules)} detected module versions"
+        )
+        answer = QMessageBox.question(
+            self,
+            "Copy installed modules",
+            f"Copy {noun} into PowerShell {self.runtime.version}'s isolated "
+            "environment?\n\nThe original installed modules will not be changed.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.installed_progress.show()
+        self.installed_status.setText(f"Copying {noun} in the background…")
+        self.copy_selected_button.setEnabled(False)
+        self.copy_all_button.setEnabled(False)
+        self.refresh_installed_button.setEnabled(False)
+        self._start_background(
+            copy_installed_modules,
+            self._installed_modules_copied,
+            self.runtime,
+            modules,
+        )
+
+    def _installed_modules_copied(self, count):
+        self.installed_status.setText(
+            f"Copied {count} module version{'s' if count != 1 else ''}. "
+            "Existing isolated versions were left unchanged."
+        )
+        self.refresh_modules()
 
     def prompt_install_module(self):
         name, accepted = QInputDialog.getText(

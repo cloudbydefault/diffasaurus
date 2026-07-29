@@ -14,5 +14,6 @@ reports/*.csv
 pwsh/*
 !pwsh/.gitkeep
 powershell-environments/
+.DS_Store
 psmodules/*
 !psmodules/.gitkeep

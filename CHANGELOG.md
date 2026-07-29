@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Separate background-scanned counts for Diffasaurus-isolated modules and
+  modules installed in normal PowerShell user or machine locations.
+- An installed-module inventory with explicit, background copying of one or
+  all installed module versions into a runtime's independent environment.
+
+### Fixed
+
+- The runtime manager no longer reports `0` in a misleading “Private modules”
+  column when a system PowerShell has native modules installed. The interface
+  now clearly distinguishes **Isolated** from **Installed** modules.
+
 ## 0.2.0-preview.3
 
 This private preview turns every detected PowerShell version into an
