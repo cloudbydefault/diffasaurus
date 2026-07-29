@@ -1,15 +1,20 @@
 import csv
+import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from diffasaurus.core.report_history import (
+    analyze_snapshot,
     compare_snapshots,
     expected_business_days,
     report_family,
     report_run_health,
+    scan_report_index,
     scan_report_history,
+    save_analysis_cache,
     suggested_key,
 )
 
@@ -77,6 +82,64 @@ class StandaloneHistoryTests(unittest.TestCase):
             )[0]
             self.assertEqual((health.expected, health.observed, health.missing, health.late), (3, 3, 0, 1))
             self.assertEqual(health.status, "Completed late")
+
+    def test_large_folder_index_does_not_parse_csv_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(500):
+                captured = datetime(2026, 1, 1) + timedelta(minutes=index)
+                path = root / f"Entra_Users_Properties_{captured:%Y%m%d-%H%M%S}.csv"
+                path.write_text("UPN;Department\n", encoding="utf-8")
+
+            progress = []
+            with patch(
+                "diffasaurus.core.report_history.read_csv_rows",
+                side_effect=AssertionError("indexing must stay lazy"),
+            ):
+                families = scan_report_index(
+                    root,
+                    progress=lambda current, total, label: progress.append(
+                        (current, total, label)
+                    ),
+                )
+
+            snapshots = families["Entra_Users_Properties"]
+            self.assertEqual(len(snapshots), 500)
+            self.assertTrue(all(snapshot.row_count == -1 for snapshot in snapshots))
+            self.assertTrue(all(not snapshot.headers for snapshot in snapshots))
+            self.assertEqual(progress[-1][:2], (500, 500))
+
+    def test_analysis_cache_survives_process_memory_reset(self):
+        import diffasaurus.core.report_history as history
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_path = root / "analysis-cache.json"
+            report = root / "Entra_Users_Properties_20260728-010000.csv"
+            write_report(
+                report,
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshot = scan_report_index(root)["Entra_Users_Properties"][0]
+            with patch.dict(
+                os.environ,
+                {"DIFFASAURUS_ANALYSIS_CACHE": str(cache_path)},
+            ):
+                hydrated, _title, _metrics = analyze_snapshot(snapshot)
+                save_analysis_cache()
+                self.assertEqual(hydrated.row_count, 1)
+                self.assertTrue(cache_path.is_file())
+
+                with history._CACHE_LOCK:
+                    history._ANALYSIS_CACHE.clear()
+                    history._PERSISTENT_CACHE_SOURCE = None
+                with patch.object(
+                    history.CsvTableModel,
+                    "load_csv",
+                    side_effect=AssertionError("persistent cache should avoid parsing"),
+                ):
+                    cached, _title, _metrics = analyze_snapshot(snapshot)
+                self.assertEqual(cached.row_count, 1)
 
 
 if __name__ == "__main__":

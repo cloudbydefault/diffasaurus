@@ -3,6 +3,7 @@ from pathlib import Path
 root = Path(SPECPATH)
 datas = [
     (str(root / "psscripts"), "psscripts"),
+    (str(root / "assets"), "assets"),
 ]
 
 analysis = Analysis(
@@ -28,6 +29,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=str(root / "assets" / "diffasaurus-icon.png"),
     contents_directory=".",
 )
 bundle = COLLECT(
