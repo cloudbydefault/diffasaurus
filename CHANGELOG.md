@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.0-preview.2
+
+This private preview makes manual report recovery reliable on packaged macOS
+and Windows builds.
+
+### Added
+
+- PowerShell runtime manager with version, source, architecture, and executable
+  details.
+- Detection outside the GUI application's restricted `PATH`, including
+  Homebrew, Microsoft, Linux, and Windows installation locations.
+- Persistent selection between detected system and managed portable PowerShell
+  runtimes.
+- Portable runtime import, removal, download shortcut, and rescan controls.
+- Missing-report indicators plus one-click selection and retry of failed
+  report runs.
+
+### Improved
+
+- Every included report now writes manual recovery snapshots into the active
+  local, OneDrive, or SharePoint-synchronized history folder.
+- Report generation remains open after a run so output and failures can be
+  reviewed before retrying.
+
+### Packaging notes
+
+- macOS and Windows packages remain preview builds without production signing
+  or notarization.
+
 ## 0.2.0-preview.1
 
 This private preview focuses on long-history performance and the first Windows

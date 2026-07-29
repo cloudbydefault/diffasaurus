@@ -6,7 +6,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, QSize, Qt
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -21,27 +23,68 @@ from PyQt6.QtWidgets import (
 from diffasaurus.core.paths import (
     list_report_scripts,
     modules_dir,
-    powershell_executable,
     project_root,
-    reports_dir,
 )
+from diffasaurus.core.powershell_runtime import (
+    PowerShellRuntime,
+    discover_powershell_runtimes,
+    select_powershell_runtime,
+    selected_powershell_runtime,
+)
+from diffasaurus.core.report_history import expected_business_days, scan_report_index
+from diffasaurus.core.settings import get_active_reports_dir
+from diffasaurus.ui.powershell_manager import PowerShellManagerDialog
 
 
 REPORT_CATALOG = {
-    "_app_ENTRA_Users_Properties.ps1": ("👤", "ENTRA · Identities", "Identity attributes and licenses"),
-    "_app_ENTRA_Users_Activity.ps1": ("📈", "ENTRA · User activity", "Sign-ins and inactivity"),
-    "_app_ENTRA_Users_AuthenticationMethods.ps1": ("🔐", "ENTRA · Authentication", "MFA and passwordless posture"),
-    "_app_ENTRA_Groups_Information.ps1": ("👥", "ENTRA · Groups", "Groups, owners and dependencies"),
-    "_app_ENTRA_Groups_User_Memberships.ps1": ("🔗", "ENTRA · User memberships", "Group membership by identity"),
-    "_app_ENTRA_Access_Packages.ps1": ("🎟", "ENTRA · Access packages", "Entitlement management packages"),
-    "app_ENTRA_AccessPackage_Assignments.ps1": ("🎫", "ENTRA · Package assignments", "Access package assignments"),
-    "_app_ENTRA_Role_Assignments.ps1": ("🛡", "ENTRA · Role assignments", "Privileged role governance"),
-    "_app_INTUNE_Users_Devices.ps1": ("💻", "INTUNE · Managed devices", "Compliance and activity"),
-    "_app_INTUNE_Autopilot_Devices.ps1": ("🚀", "INTUNE · Autopilot", "Autopilot inventory"),
-    "_app_INTUNE_Apps_Report.ps1": ("📦", "INTUNE · Applications", "Application inventory"),
-    "_app_INTUNE_iOS_Devices.ps1": ("📱", "INTUNE · iOS devices", "iPhone and iPad posture"),
-    "app_EXCHANGE_SharedMailboxes_Report.ps1": ("📬", "EXCHANGE · Shared mailboxes", "Permissions and activity"),
+    "_app_ENTRA_Users_Properties.ps1": (
+        "👤", "ENTRA · Identities", "Identity attributes and licenses", "Entra_Users_Properties"
+    ),
+    "_app_ENTRA_Users_Activity.ps1": (
+        "📈", "ENTRA · User activity", "Sign-ins and inactivity", "Entra_Users_Activity"
+    ),
+    "_app_ENTRA_Users_AuthenticationMethods.ps1": (
+        "🔐", "ENTRA · Authentication", "MFA and passwordless posture",
+        "Entra_Users_AuthenticationMethods",
+    ),
+    "_app_ENTRA_Groups_Information.ps1": (
+        "👥", "ENTRA · Groups", "Groups, owners and dependencies", "Entra_Groups_Dependencies"
+    ),
+    "_app_ENTRA_Groups_User_Memberships.ps1": (
+        "🔗", "ENTRA · User memberships", "Group membership by identity",
+        "Entra_Group_User_Memberships",
+    ),
+    "_app_ENTRA_Access_Packages.ps1": (
+        "🎟", "ENTRA · Access packages", "Entitlement management packages", "Entra_Access_Packages"
+    ),
+    "app_ENTRA_AccessPackage_Assignments.ps1": (
+        "🎫", "ENTRA · Package assignments", "Access package assignments",
+        "Entra_AccessPackage_User_Assignments",
+    ),
+    "_app_ENTRA_Role_Assignments.ps1": (
+        "🛡", "ENTRA · Role assignments", "Privileged role governance", "Entra_Role_Assignments"
+    ),
+    "_app_INTUNE_Users_Devices.ps1": (
+        "💻", "INTUNE · Managed devices", "Compliance and activity",
+        "Intune_ManagedDevices_Compliance",
+    ),
+    "_app_INTUNE_Autopilot_Devices.ps1": (
+        "🚀", "INTUNE · Autopilot", "Autopilot inventory", "Intune_Devices_Autopilot"
+    ),
+    "_app_INTUNE_Apps_Report.ps1": (
+        "📦", "INTUNE · Applications", "Application inventory", "Intune_Apps_Full"
+    ),
+    "_app_INTUNE_iOS_Devices.ps1": (
+        "📱", "INTUNE · iOS devices", "iPhone and iPad posture", "Intune_iOS_Devices"
+    ),
+    "app_EXCHANGE_SharedMailboxes_Report.ps1": (
+        "📬", "EXCHANGE · Shared mailboxes", "Permissions and activity",
+        "Exchange_SharedMailboxes",
+    ),
 }
+
+SCRIPT_PATH_ROLE = int(Qt.ItemDataRole.UserRole)
+MISSING_ROLE = SCRIPT_PATH_ROLE + 1
 
 
 def graph_scopes(script: Path) -> list[str]:
@@ -55,8 +98,11 @@ class RunScriptsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Generate tenant snapshots")
         self.resize(920, 680)
-        self.pwsh = powershell_executable()
+        self.runtimes: list[PowerShellRuntime] = []
+        self.pwsh_runtime: PowerShellRuntime | None = None
+        self.report_dir = get_active_reports_dir()
         self.queue: list[Path] = []
+        self.failures: list[Path] = []
         self.current_index = -1
 
         layout = QVBoxLayout(self)
@@ -69,6 +115,44 @@ class RunScriptsDialog(QDialog):
         subtitle.setStyleSheet("color:#8295a8;")
         layout.addWidget(title)
         layout.addWidget(subtitle)
+
+        runtime_card = QFrame()
+        runtime_card.setObjectName("runtimeCard")
+        runtime_layout = QHBoxLayout(runtime_card)
+        runtime_layout.setContentsMargins(14, 11, 14, 11)
+        runtime_layout.setSpacing(10)
+        runtime_label = QLabel("POWERSHELL")
+        runtime_label.setStyleSheet(
+            "color:#8295a8; font-size:10px; font-weight:750; letter-spacing:1px;"
+        )
+        self.runtime_combo = QComboBox()
+        self.runtime_combo.setMinimumWidth(370)
+        self.runtime_combo.currentIndexChanged.connect(self.runtime_changed)
+        self.runtime_status = QLabel("")
+        self.runtime_status.setStyleSheet("color:#8295a8;")
+        self.manage_runtime_button = QPushButton("Manage runtimes")
+        self.manage_runtime_button.clicked.connect(self.manage_runtimes)
+        self.rescan_runtime_button = QPushButton("Rescan")
+        self.rescan_runtime_button.clicked.connect(self.refresh_runtimes)
+        runtime_layout.addWidget(runtime_label)
+        runtime_layout.addWidget(self.runtime_combo)
+        runtime_layout.addWidget(self.runtime_status, 1)
+        runtime_layout.addWidget(self.rescan_runtime_button)
+        runtime_layout.addWidget(self.manage_runtime_button)
+        layout.addWidget(runtime_card)
+
+        report_tools = QHBoxLayout()
+        self.report_status = QLabel("")
+        self.report_status.setStyleSheet("color:#8295a8;")
+        select_missing = QPushButton("Select missing")
+        select_missing.clicked.connect(self.select_missing)
+        select_all = QPushButton("Select all")
+        select_all.clicked.connect(self.select_all)
+        report_tools.addWidget(self.report_status)
+        report_tools.addStretch()
+        report_tools.addWidget(select_missing)
+        report_tools.addWidget(select_all)
+        layout.addLayout(report_tools)
 
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -84,11 +168,15 @@ class RunScriptsDialog(QDialog):
         self.progress.setValue(0)
         close = QPushButton("Close")
         self.run = QPushButton("Generate selected")
+        self.retry = QPushButton("Retry failed")
+        self.retry.hide()
         self.run.setObjectName("primaryButton")
         close.clicked.connect(self.reject)
         self.run.clicked.connect(self.start)
+        self.retry.clicked.connect(self.retry_failed)
         bottom.addWidget(self.progress, 1)
         bottom.addWidget(close)
+        bottom.addWidget(self.retry)
         bottom.addWidget(self.run)
         layout.addLayout(bottom)
 
@@ -96,19 +184,99 @@ class RunScriptsDialog(QDialog):
         self.process.readyReadStandardOutput.connect(self.read_stdout)
         self.process.readyReadStandardError.connect(self.read_stderr)
         self.process.finished.connect(self.finished)
+        self.refresh_runtimes()
         self.load_scripts()
 
     def load_scripts(self):
         self.list.clear()
         available = {path.name: path for path in list_report_scripts()}
-        for filename, (icon, title, description) in REPORT_CATALOG.items():
+        try:
+            history = scan_report_index(self.report_dir)
+        except Exception:
+            history = {}
+        expected_day = expected_business_days(count=1)[0]
+        missing_count = 0
+        for filename, (icon, title, description, family) in REPORT_CATALOG.items():
             path = available.get(filename)
             if not path:
                 continue
-            item = QListWidgetItem(f"{icon}  {title}\n     {description}\n     {filename}")
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            snapshots = history.get(family, [])
+            latest = snapshots[-1].captured_at if snapshots else None
+            missing = latest is None or latest.date() < expected_day
+            missing_count += int(missing)
+            if missing:
+                evidence = f"⚠ Missing {expected_day:%d %b %Y}"
+            else:
+                evidence = f"✓ Latest {latest:%d %b %Y · %H:%M}"
+            item = QListWidgetItem(
+                f"{icon}  {title}     {evidence}\n"
+                f"     {description}\n"
+                f"     {filename}"
+            )
+            item.setData(SCRIPT_PATH_ROLE, str(path))
+            item.setData(MISSING_ROLE, missing)
             item.setSizeHint(QSize(0, 78))
             self.list.addItem(item)
+        self.report_status.setText(
+            f"{missing_count} missing · output to {self.report_dir}"
+            if missing_count
+            else f"All scheduled reports present · output to {self.report_dir}"
+        )
+
+    def refresh_runtimes(self, preferred: Path | None = None):
+        selected_path = preferred or (
+            self.pwsh_runtime.path if self.pwsh_runtime else None
+        )
+        self.runtimes = discover_powershell_runtimes()
+        active = selected_powershell_runtime(self.runtimes)
+        self.runtime_combo.blockSignals(True)
+        self.runtime_combo.clear()
+        if not self.runtimes:
+            self.runtime_combo.addItem("No PowerShell runtime detected", None)
+        for runtime in self.runtimes:
+            self.runtime_combo.addItem(runtime.label, runtime)
+        target = ""
+        if selected_path:
+            try:
+                target = str(selected_path.resolve())
+            except OSError:
+                target = str(selected_path)
+        elif active:
+            target = active.identity
+        for index, runtime in enumerate(self.runtimes):
+            if runtime.identity == target:
+                self.runtime_combo.setCurrentIndex(index)
+                break
+        self.runtime_combo.blockSignals(False)
+        self.runtime_changed()
+
+    def runtime_changed(self):
+        runtime = self.runtime_combo.currentData()
+        self.pwsh_runtime = runtime if isinstance(runtime, PowerShellRuntime) else None
+        if self.pwsh_runtime:
+            select_powershell_runtime(self.pwsh_runtime)
+            self.runtime_status.setText(
+                "Ready" if self.pwsh_runtime.supported else "PowerShell 7+ required"
+            )
+        else:
+            self.runtime_status.setText("No runtime detected")
+
+    def manage_runtimes(self):
+        dialog = PowerShellManagerDialog(self)
+        if dialog.exec() and dialog.selected_runtime:
+            self.refresh_runtimes(dialog.selected_runtime.path)
+        else:
+            self.refresh_runtimes()
+
+    def select_missing(self):
+        self.list.clearSelection()
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if bool(item.data(MISSING_ROLE)):
+                item.setSelected(True)
+
+    def select_all(self):
+        self.list.selectAll()
 
     def append(self, value: str):
         self.output.moveCursor(self.output.textCursor().MoveOperation.End)
@@ -116,14 +284,15 @@ class RunScriptsDialog(QDialog):
         self.output.moveCursor(self.output.textCursor().MoveOperation.End)
 
     def start(self):
-        if not self.pwsh:
+        if not self.pwsh_runtime or not self.pwsh_runtime.supported:
             QMessageBox.warning(
                 self,
                 "PowerShell required",
-                "PowerShell 7 was not found. Install pwsh or place a portable runtime in the pwsh folder.",
+                "Choose a PowerShell 7 runtime or add an extracted portable version "
+                "with Manage runtimes.",
             )
             return
-        selected = [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.list.selectedItems()]
+        selected = [Path(item.data(SCRIPT_PATH_ROLE)) for item in self.list.selectedItems()]
         if not selected:
             QMessageBox.information(self, "Generate reports", "Select at least one report.")
             return
@@ -139,19 +308,35 @@ class RunScriptsDialog(QDialog):
             return
 
         self.queue = selected
+        self.failures = []
         self.current_index = -1
         self.output.clear()
+        self.retry.hide()
         self.progress.setRange(0, len(selected))
         self.progress.setValue(0)
         self.run.setEnabled(False)
+        self.runtime_combo.setEnabled(False)
+        self.rescan_runtime_button.setEnabled(False)
+        self.manage_runtime_button.setEnabled(False)
         self.run_next()
 
     def run_next(self):
         self.current_index += 1
         if self.current_index >= len(self.queue):
-            self.append("\n✓ All selected reports finished.\n")
+            if self.failures:
+                self.append(
+                    f"\n⚠ Completed with {len(self.failures)} failed report"
+                    f"{'s' if len(self.failures) != 1 else ''}. "
+                    "Review the output and retry when ready.\n"
+                )
+                self.retry.show()
+            else:
+                self.append("\n✓ All selected reports finished successfully.\n")
             self.run.setEnabled(True)
-            self.accept()
+            self.runtime_combo.setEnabled(True)
+            self.rescan_runtime_button.setEnabled(True)
+            self.manage_runtime_button.setEnabled(True)
+            self.load_scripts()
             return
         script = self.queue[self.current_index]
         self.progress.setValue(self.current_index)
@@ -162,13 +347,13 @@ class RunScriptsDialog(QDialog):
             "PSModulePath",
             embedded + (f"{os.pathsep}{existing_modules}" if existing_modules else ""),
         )
-        environment.insert("REPORTS_DIR", str(reports_dir()))
+        environment.insert("REPORTS_DIR", str(self.report_dir))
         environment.insert("POWERSHELL_TELEMETRY_OPTOUT", "1")
         self.process.setProcessEnvironment(environment)
         self.process.setWorkingDirectory(str(project_root()))
         self.append(f"\n▶ {script.name}\n")
         self.process.start(
-            str(self.pwsh),
+            str(self.pwsh_runtime.path),
             (
                 "-NoLogo",
                 "-NoProfile",
@@ -180,6 +365,8 @@ class RunScriptsDialog(QDialog):
         )
         if not self.process.waitForStarted(3000):
             self.append("Could not start PowerShell.\n")
+            if script not in self.failures:
+                self.failures.append(script)
             self.run_next()
 
     def read_stdout(self):
@@ -190,5 +377,18 @@ class RunScriptsDialog(QDialog):
 
     def finished(self, exit_code: int, _status):
         self.append(f"\n[exit {exit_code}]\n")
+        if exit_code != 0 and self.queue[self.current_index] not in self.failures:
+            self.failures.append(self.queue[self.current_index])
         self.progress.setValue(self.current_index + 1)
         self.run_next()
+
+    def retry_failed(self):
+        if not self.failures:
+            return
+        paths = {str(path) for path in self.failures}
+        self.list.clearSelection()
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(SCRIPT_PATH_ROLE) in paths:
+                item.setSelected(True)
+        self.start()

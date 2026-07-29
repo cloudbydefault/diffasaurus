@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -48,19 +47,18 @@ def modules_dir() -> Path:
     return path
 
 
+def powershell_runtimes_dir() -> Path:
+    path = user_data_dir() / "pwsh"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def list_report_scripts() -> list[Path]:
     return sorted(scripts_dir().glob("*.ps1"), key=lambda path: path.name.lower())
 
 
 def powershell_executable() -> Path | None:
-    bundled = project_root() / "pwsh"
-    names = ("pwsh.exe",) if sys.platform == "win32" else ("pwsh",)
-    for name in names:
-        direct = bundled / name
-        if direct.is_file():
-            return direct
-        matches = sorted(bundled.rglob(name), key=lambda path: len(path.parts), reverse=True)
-        if matches:
-            return matches[0]
-    system_pwsh = shutil.which("pwsh")
-    return Path(system_pwsh) if system_pwsh else None
+    from diffasaurus.core.powershell_runtime import selected_powershell_runtime
+
+    runtime = selected_powershell_runtime()
+    return runtime.path if runtime else None

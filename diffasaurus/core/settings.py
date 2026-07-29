@@ -9,6 +9,7 @@ from diffasaurus.core.paths import reports_dir, user_data_dir
 DEFAULT_SETTINGS = {
     "report_source": "local",
     "external_reports_path": "",
+    "powershell_runtime_path": "",
 }
 
 
@@ -46,3 +47,14 @@ def get_active_reports_dir() -> Path:
         if external.is_dir():
             return external
     return reports_dir()
+
+
+def get_powershell_runtime_path() -> Path | None:
+    value = str(load_settings().get("powershell_runtime_path", "") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def set_powershell_runtime_path(path: Path | None) -> None:
+    settings = load_settings()
+    settings["powershell_runtime_path"] = str(path) if path else ""
+    save_settings(settings)

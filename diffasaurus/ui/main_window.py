@@ -1208,6 +1208,11 @@ def diffasaurus_stylesheet() -> str:
             border: 1px solid #214352;
             border-radius: 11px;
         }}
+        QFrame#runtimeCard {{
+            background: #10212c;
+            border: 1px solid #214352;
+            border-radius: 11px;
+        }}
         QLabel#sectionTitle {{
             font-size: 17px;
             font-weight: 700;
