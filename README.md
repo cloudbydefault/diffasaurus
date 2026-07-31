@@ -11,7 +11,7 @@ or mailbox.
 It is read-only by design when exploring history and does not require a
 database server, cloud service, or connection to the original Coco365 project.
 
-![Diffasaurus scheduled run health](docs/diffasaurus-run-health.png)
+![Diffasaurus scheduled run health](docs/diffasaurus-dig-site.png)
 
 ## Core views
 
