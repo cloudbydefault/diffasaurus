@@ -50,6 +50,7 @@ from diffasaurus.core.settings import get_active_reports_dir
 from diffasaurus.ui.report_runner import CATALOG_FAMILY_ORDER, RunScriptsDialog
 from diffasaurus.ui.source_settings import ReportSourceSettingsDialog
 from diffasaurus.ui.charts import ChangeBars, LineChart
+from diffasaurus.ui.entity_history import EntityHistoryPage
 from diffasaurus.ui.recent_changes import RecentChangesPage
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
 
@@ -195,6 +196,8 @@ class DiffasaurusWindow(QMainWindow):
         self._comparison_generation = 0
         self._recent_changes_generation = 0
         self._recent_detail_generation = 0
+        self._entity_index_generation = 0
+        self._entity_changes_generation = 0
         self._pending_family = ""
         self._preferred_metric = ""
         self._family_cancelled = threading.Event()
@@ -235,6 +238,7 @@ class DiffasaurusWindow(QMainWindow):
         self.nav_buttons = []
         for label in (
             "◉   Recent changes",
+            "◇   Entity history",
             "◈   Dig site",
             "▦   Run health",
             "▤   Fossil library",
@@ -304,6 +308,8 @@ class DiffasaurusWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.recent_changes_page = RecentChangesPage()
         self.stack.addWidget(self.recent_changes_page)
+        self.entity_history_page = EntityHistoryPage()
+        self.stack.addWidget(self.entity_history_page)
         self.overview_page = self._build_overview()
         overview_scroll = QScrollArea()
         overview_scroll.setObjectName("overviewScroll")
@@ -643,18 +649,25 @@ class DiffasaurusWindow(QMainWindow):
         self.recent_changes_page.period_changed.connect(self._refresh_recent_changes)
         self.recent_changes_page.details_requested.connect(self._load_recent_details)
         self.recent_changes_page.open_in_compare_requested.connect(self._open_recent_in_compare)
+        self.entity_history_page.period_changed.connect(self._refresh_entity_period_changes)
+        self.entity_history_page.entity_selected.connect(self._refresh_entity_period_changes)
+        self.entity_history_page.refresh_requested.connect(self._refresh_entity_index)
 
     def show_page(self, index: int):
         for current, button in enumerate(self.nav_buttons):
             button.setChecked(current == index)
         self.stack.setCurrentIndex(index)
-        on_recent = index == 0
-        self.family_label.setVisible(not on_recent)
-        self.family_combo.setVisible(not on_recent)
+        on_landing = index in (0, 1)
+        self.family_label.setVisible(not on_landing)
+        self.family_combo.setVisible(not on_landing)
         titles = (
             (
                 "Recent changes",
                 "See what changed across every supported report since your last collections.",
+            ),
+            (
+                "Entity history",
+                "Trace one user, device, or shared mailbox across every snapshot that knows about it.",
             ),
             ("The dig site", "Unearthing your Microsoft 365 history, one CSV fossil at a time."),
             ("Scheduled run health", "See which weekday collections produced evidence—and which outputs are missing."),
@@ -667,10 +680,12 @@ class DiffasaurusWindow(QMainWindow):
         )
         self.page_title.setText(titles[index][0])
         self.page_subtitle.setText(titles[index][1])
-        if index == 5:
+        if index == 6:
             self.snapshot_explorer.activate()
         if index == 0:
             self._refresh_recent_changes()
+        if index == 1:
+            self._refresh_entity_index()
 
     def _run_background(
         self,
@@ -764,6 +779,7 @@ class DiffasaurusWindow(QMainWindow):
         self._update_source_badge()
         self._refresh_run_health()
         self._refresh_recent_changes()
+        self._refresh_entity_index()
         self.family_changed()
 
     def _index_failed(self, generation: int, message: str):
@@ -847,7 +863,7 @@ class DiffasaurusWindow(QMainWindow):
             self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
         self.snapshot_explorer.set_snapshots(snapshots)
-        if self.stack.currentIndex() == 5:
+        if self.stack.currentIndex() == 6:
             self.snapshot_explorer.activate()
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
@@ -1133,6 +1149,54 @@ class DiffasaurusWindow(QMainWindow):
         self._hide_progress()
         QMessageBox.warning(self, "Compare snapshots", message)
 
+    def _refresh_entity_index(self):
+        self._entity_index_generation += 1
+        generation = self._entity_index_generation
+        self.entity_history_page.show_indexing()
+        self._run_background(
+            EntityHistoryPage.build_resolver,
+            (self.families,),
+            lambda resolver: self._entity_index_ready(generation, resolver),
+            lambda message: self._entity_index_failed(generation, message),
+        )
+
+    def _entity_index_ready(self, generation: int, resolver):
+        if generation != self._entity_index_generation:
+            return
+        self.entity_history_page.set_resolver(resolver)
+        if self.entity_history_page._selected:
+            self._refresh_entity_period_changes()
+
+    def _entity_index_failed(self, generation: int, message: str):
+        if generation != self._entity_index_generation:
+            return
+        QMessageBox.warning(self, "Entity history", message)
+
+    def _refresh_entity_period_changes(self, _record=None):
+        record = self.entity_history_page._selected
+        if not record:
+            return
+        period, _label = self.entity_history_page.current_period()
+        self._entity_changes_generation += 1
+        generation = self._entity_changes_generation
+        self.entity_history_page._load_period_changes(record)
+        self._run_background(
+            EntityHistoryPage.compute_period_changes,
+            (record, self.families, period),
+            lambda changes: self._entity_period_changes_ready(generation, changes),
+            lambda message: self._entity_period_changes_failed(generation, message),
+        )
+
+    def _entity_period_changes_ready(self, generation: int, changes):
+        if generation != self._entity_changes_generation:
+            return
+        self.entity_history_page.apply_period_changes(changes)
+
+    def _entity_period_changes_failed(self, generation: int, message: str):
+        if generation != self._entity_changes_generation:
+            return
+        QMessageBox.warning(self, "Entity history", message)
+
     def _refresh_recent_changes(self):
         period, label = self.recent_changes_page.current_period()
         self._recent_changes_generation += 1
@@ -1189,7 +1253,7 @@ class DiffasaurusWindow(QMainWindow):
     ):
         if family in self.families:
             self.family_combo.setCurrentText(family)
-        self.show_page(4)
+        self.show_page(5)
         self._select_snapshot_in_combo(self.baseline_combo, baseline)
         self._select_snapshot_in_combo(self.latest_combo, latest)
         self.key_combo.setCurrentText(key_column)

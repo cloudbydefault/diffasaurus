@@ -6,7 +6,6 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -22,12 +21,12 @@ from PyQt6.QtWidgets import (
 
 from diffasaurus.core.report_history import (
     REASON_NO_BASELINE,
-    RECENT_CHANGE_PERIODS,
     ComparisonSummary,
     FamilyChangeStatus,
     RecentChangesReport,
     ReportSnapshot,
 )
+from diffasaurus.ui.period_selector import PeriodSelector
 from diffasaurus.ui.report_runner import family_display_name
 
 COLORS = {
@@ -350,15 +349,8 @@ class RecentChangesPage(QWidget):
         layout.setSpacing(14)
 
         controls = QHBoxLayout()
-        period_box = QVBoxLayout()
-        period_label = QLabel("PERIOD")
-        period_label.setObjectName("fieldLabel")
-        self.period_combo = QComboBox()
-        for label, _value in RECENT_CHANGE_PERIODS:
-            self.period_combo.addItem(f"Last {label}", label)
-        period_box.addWidget(period_label)
-        period_box.addWidget(self.period_combo)
-        controls.addLayout(period_box)
+        self.period_selector = PeriodSelector()
+        controls.addWidget(self.period_selector)
         controls.addStretch()
         self.cutoff_caption = QLabel("")
         self.cutoff_caption.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
@@ -399,14 +391,10 @@ class RecentChangesPage(QWidget):
         scroll.setWidget(self.sections_host)
         layout.addWidget(scroll, 1)
 
-        self.period_combo.currentIndexChanged.connect(self._emit_period_changed)
+        self.period_selector.period_changed.connect(self._emit_period_changed)
 
     def current_period(self) -> tuple[timedelta, str]:
-        label = self.period_combo.currentData()
-        for period_label, period in RECENT_CHANGE_PERIODS:
-            if period_label == label:
-                return period, period_label
-        return RECENT_CHANGE_PERIODS[0][1], RECENT_CHANGE_PERIODS[0][0]
+        return self.period_selector.current_period()
 
     def _emit_period_changed(self):
         period, label = self.current_period()
