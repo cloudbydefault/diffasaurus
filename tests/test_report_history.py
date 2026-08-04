@@ -9,10 +9,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from diffasaurus.core.report_history import (
+    REASON_NOT_ENOUGH_SNAPSHOTS,
+    REASON_NO_BASELINE,
+    REASON_STALE_LATEST,
     ReportSnapshot,
+    aggregate_recent_changes,
     analyze_snapshot,
     compare_snapshots,
     expected_business_days,
+    family_change_status,
     filter_history_by_days,
     metric_series,
     report_family,
@@ -21,6 +26,7 @@ from diffasaurus.core.report_history import (
     scan_report_history,
     save_analysis_cache,
     schema_changes,
+    select_period_snapshots,
     suggested_key,
 )
 
@@ -44,6 +50,518 @@ def history_snapshot(
         row_count=index,
         headers=headers,
     )
+
+
+def history_snapshot(
+    captured_at: datetime,
+    index: int,
+    headers: tuple[str, ...] = ("Id",),
+) -> ReportSnapshot:
+    return ReportSnapshot(
+        path=Path(f"Devices_{captured_at:%Y%m%d-%H%M%S}_{index}.csv"),
+        family="Devices",
+        captured_at=captured_at,
+        row_count=index,
+        headers=headers,
+    )
+
+
+def family_snapshot(
+    family: str,
+    captured_at: datetime,
+    headers: tuple[str, ...] = ("UPN",),
+) -> ReportSnapshot:
+    return ReportSnapshot(
+        path=Path(f"{family}_{captured_at:%Y%m%d-%H%M%S}.csv"),
+        family=family,
+        captured_at=captured_at,
+        row_count=1,
+        headers=headers,
+    )
+
+
+class RecentChangesTests(unittest.TestCase):
+    def test_select_period_snapshots_picks_newest_before_cutoff(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=72)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=36)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=6)),
+        ]
+        pair = select_period_snapshots(
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertIsNotNone(pair)
+        baseline, latest = pair
+        self.assertEqual(baseline.captured_at, reference - timedelta(hours=36))
+        self.assertEqual(latest.captured_at, reference - timedelta(hours=6))
+
+    def test_select_period_snapshots_no_data_single_snapshot(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [family_snapshot("Entra_Users_Properties", reference - timedelta(hours=6))]
+        status = family_change_status(
+            "Entra_Users_Properties",
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertEqual(status.status, "no_data")
+        self.assertEqual(status.reason, REASON_NOT_ENOUGH_SNAPSHOTS)
+        self.assertIsNone(select_period_snapshots(snapshots, timedelta(hours=24), reference=reference))
+
+    def test_select_period_snapshots_stale_latest_older_than_cutoff(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=48)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=40)),
+        ]
+        status = family_change_status(
+            "Entra_Users_Properties",
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertEqual(status.status, "no_data")
+        self.assertEqual(status.reason, REASON_STALE_LATEST)
+        self.assertIsNone(select_period_snapshots(snapshots, timedelta(hours=24), reference=reference))
+        self.assertIsNone(status.summary)
+
+    def test_select_period_snapshots_latest_inside_period(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=36)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=6)),
+        ]
+        pair = select_period_snapshots(
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertIsNotNone(pair)
+        baseline, latest = pair
+        self.assertEqual(baseline.captured_at, reference - timedelta(hours=36))
+        self.assertEqual(latest.captured_at, reference - timedelta(hours=6))
+
+    def test_select_period_snapshots_baseline_exactly_at_cutoff(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        cutoff = reference - timedelta(hours=24)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", cutoff),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=6)),
+        ]
+        pair = select_period_snapshots(
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertIsNotNone(pair)
+        baseline, latest = pair
+        self.assertEqual(baseline.captured_at, cutoff)
+        self.assertEqual(latest.captured_at, reference - timedelta(hours=6))
+
+    def test_select_period_snapshots_irregular_schedule(self):
+        reference = datetime(2026, 8, 8, 15, 0, 0)  # Friday afternoon
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", datetime(2026, 8, 4, 1, 0, 0)),  # Mon
+            family_snapshot("Entra_Users_Properties", datetime(2026, 8, 6, 9, 30, 0)),  # Wed
+            family_snapshot("Entra_Users_Properties", datetime(2026, 8, 8, 1, 0, 0)),  # Fri
+        ]
+        pair = select_period_snapshots(
+            snapshots,
+            timedelta(hours=48),
+            reference=reference,
+        )
+        self.assertIsNotNone(pair)
+        baseline, latest = pair
+        self.assertEqual(baseline.captured_at, datetime(2026, 8, 6, 9, 30, 0))
+        self.assertEqual(latest.captured_at, datetime(2026, 8, 8, 1, 0, 0))
+
+    def test_family_change_status_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "Entra_Users_Properties_20260728-010000.csv"
+            after = root / "Entra_Users_Properties_20260804-010000.csv"
+            rows = [{"UPN": "ada@example.com", "Department": "Engineering"}]
+            write_report(before, rows)
+            write_report(after, rows)
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            status = family_change_status(
+                "Entra_Users_Properties",
+                snapshots,
+                timedelta(days=7),
+                reference=datetime(2026, 8, 4, 12, 0, 0),
+            )
+            self.assertEqual(status.status, "unchanged")
+            self.assertIsNotNone(status.summary)
+            self.assertEqual(status.summary.total_changes, 0)
+
+    def test_aggregate_recent_changes_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 12, 0, 0)
+
+            changed_before = root / "Entra_Users_Properties_20260728-010000.csv"
+            changed_after = root / "Entra_Users_Properties_20260804-010000.csv"
+            write_report(
+                changed_before,
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                changed_after,
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+
+            unchanged_before = root / "Entra_Access_Packages_20260728-010000.csv"
+            unchanged_after = root / "Entra_Access_Packages_20260804-010000.csv"
+            rows = [{"Id": "pkg-1", "DisplayName": "Finance"}]
+            write_report(unchanged_before, rows)
+            write_report(unchanged_after, rows)
+
+            stale = root / "Intune_Apps_Full_20260720-010000.csv"
+            write_report(stale, [{"Id": "app-1", "DisplayName": "Teams"}])
+
+            families = scan_report_history(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(days=7),
+                reference=reference,
+                family_order=(
+                    "Entra_Users_Properties",
+                    "Entra_Access_Packages",
+                    "Intune_Apps_Full",
+                ),
+            )
+            by_family = {item.family: item for item in report.families}
+            self.assertEqual(by_family["Entra_Users_Properties"].status, "changed")
+            self.assertEqual(by_family["Entra_Access_Packages"].status, "unchanged")
+            self.assertEqual(by_family["Intune_Apps_Full"].status, "no_data")
+            self.assertEqual(by_family["Intune_Apps_Full"].reason, REASON_NOT_ENOUGH_SNAPSHOTS)
+            self.assertEqual(report.changed_count, 1)
+            self.assertEqual(report.unchanged_count, 1)
+            self.assertEqual(report.no_data_count, 1)
+
+    def test_aggregate_never_fabricates_baseline(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=20)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=10)),
+        ]
+        status = family_change_status(
+            "Entra_Users_Properties",
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertEqual(status.status, "no_data")
+        self.assertEqual(status.reason, REASON_NO_BASELINE)
+        self.assertIsNone(status.baseline)
+        self.assertIsNone(select_period_snapshots(snapshots, timedelta(hours=24), reference=reference))
+
+    def test_family_change_status_works_with_index_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_index(root)["Entra_Users_Properties"]
+            self.assertTrue(all(not snapshot.headers for snapshot in snapshots))
+            status = family_change_status(
+                "Entra_Users_Properties",
+                snapshots,
+                timedelta(hours=48),
+                reference=reference,
+            )
+            self.assertEqual(status.status, "changed")
+            self.assertEqual(status.reason, "")
+            self.assertIsNotNone(status.baseline)
+            self.assertIsNotNone(status.latest)
+            self.assertEqual(status.baseline.captured_at, datetime(2026, 7, 31, 4, 21))
+            self.assertEqual(status.latest.captured_at, datetime(2026, 8, 4, 4, 21))
+            self.assertNotEqual(status.reason, REASON_NO_BASELINE)
+
+    def test_aggregate_processes_families_independently_from_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260730-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260804-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            families = scan_report_index(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(hours=48),
+                reference=reference,
+                family_order=("Entra_Users_Properties", "Entra_Access_Packages"),
+            )
+            by_family = {item.family: item for item in report.families}
+            self.assertEqual(by_family["Entra_Users_Properties"].status, "changed")
+            self.assertEqual(by_family["Entra_Access_Packages"].status, "unchanged")
+            self.assertEqual(
+                by_family["Entra_Users_Properties"].baseline.captured_at,
+                datetime(2026, 7, 31, 4, 21),
+            )
+            self.assertEqual(
+                by_family["Entra_Users_Properties"].latest.captured_at,
+                datetime(2026, 8, 4, 4, 21),
+            )
+            self.assertEqual(
+                by_family["Entra_Access_Packages"].baseline.captured_at,
+                datetime(2026, 7, 30, 1, 0),
+            )
+            self.assertEqual(
+                by_family["Entra_Access_Packages"].latest.captured_at,
+                datetime(2026, 8, 4, 1, 0),
+            )
+
+    def test_aggregate_result_is_independent_of_selected_family_subset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260730-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260804-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            families = scan_report_index(root)
+            full_report = aggregate_recent_changes(
+                families,
+                timedelta(hours=48),
+                reference=reference,
+                family_order=("Entra_Users_Properties", "Entra_Access_Packages"),
+            )
+            selected_only = {
+                "Entra_Access_Packages": families["Entra_Access_Packages"],
+            }
+            partial_report = aggregate_recent_changes(
+                selected_only,
+                timedelta(hours=48),
+                reference=reference,
+                family_order=("Entra_Users_Properties", "Entra_Access_Packages"),
+            )
+            full_by_family = {item.family: item for item in full_report.families}
+            partial_by_family = {item.family: item for item in partial_report.families}
+            self.assertEqual(
+                full_by_family["Entra_Access_Packages"].status,
+                partial_by_family["Entra_Access_Packages"].status,
+            )
+            self.assertEqual(
+                full_by_family["Entra_Access_Packages"].latest.captured_at,
+                partial_by_family["Entra_Access_Packages"].latest.captured_at,
+            )
+            self.assertEqual(full_by_family["Entra_Users_Properties"].status, "changed")
+            self.assertNotIn("Entra_Users_Properties", partial_by_family)
+            self.assertEqual(len(partial_report.families), 1)
+
+    def test_aggregate_omits_catalog_families_without_indexed_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 12, 0, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260804-010000.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            families = scan_report_index(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(days=7),
+                reference=reference,
+                family_order=(
+                    "Entra_Users_Properties",
+                    "Entra_Users_AuthenticationMethods",
+                    "Intune_Apps_Full",
+                    "Intune_iOS_Devices",
+                ),
+            )
+            self.assertEqual(
+                {item.family for item in report.families},
+                {"Entra_Users_Properties"},
+            )
+
+    def test_aggregate_includes_single_snapshot_family_as_no_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 12, 0, 0)
+            write_report(
+                root / "Intune_Apps_Full_20260804-010000.csv",
+                [{"Id": "app-1", "DisplayName": "Teams"}],
+            )
+            families = scan_report_index(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(days=7),
+                reference=reference,
+                family_order=("Intune_Apps_Full", "Intune_iOS_Devices"),
+            )
+            self.assertEqual(len(report.families), 1)
+            self.assertEqual(report.families[0].family, "Intune_Apps_Full")
+            self.assertEqual(report.families[0].status, "no_data")
+            self.assertEqual(report.families[0].reason, REASON_NOT_ENOUGH_SNAPSHOTS)
+
+    def test_aggregate_includes_unknown_indexed_family(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 12, 0, 0)
+            write_report(
+                root / "Custom_Tenant_Export_20260804-010000.csv",
+                [{"Id": "row-1", "Value": "alpha"}],
+            )
+            families = scan_report_index(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(days=7),
+                reference=reference,
+                family_order=("Entra_Users_Properties",),
+            )
+            self.assertEqual(len(report.families), 1)
+            self.assertEqual(report.families[0].family, "Custom_Tenant_Export")
+            self.assertEqual(report.families[0].status, "no_data")
+
+    def test_aggregate_totals_count_only_indexed_families(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 12, 0, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260728-010000.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-010000.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260728-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            write_report(
+                root / "Entra_Access_Packages_20260804-010000.csv",
+                [{"Id": "pkg-1", "DisplayName": "Finance"}],
+            )
+            write_report(
+                root / "Intune_Apps_Full_20260804-010000.csv",
+                [{"Id": "app-1", "DisplayName": "Teams"}],
+            )
+            families = scan_report_index(root)
+            report = aggregate_recent_changes(
+                families,
+                timedelta(days=7),
+                reference=reference,
+                family_order=(
+                    "Entra_Users_Properties",
+                    "Entra_Access_Packages",
+                    "Intune_Apps_Full",
+                    "Entra_Users_AuthenticationMethods",
+                    "Intune_iOS_Devices",
+                ),
+            )
+            self.assertEqual(len(report.families), 3)
+            self.assertEqual(report.changed_count, 1)
+            self.assertEqual(report.unchanged_count, 1)
+            self.assertEqual(report.no_data_count, 1)
+
+    def test_no_data_status_matches_snapshot_fields(self):
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=20)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=10)),
+        ]
+        status = family_change_status(
+            "Entra_Users_Properties",
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        self.assertEqual(status.status, "no_data")
+        self.assertEqual(status.reason, REASON_NO_BASELINE)
+        self.assertIsNone(status.baseline)
+        self.assertIsNotNone(status.latest)
+
+
+class RecentChangesUiConsistencyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_apply_status_does_not_show_baseline_for_true_no_baseline_reason(self):
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        reference = datetime(2026, 8, 4, 12, 0, 0)
+        snapshots = [
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=20)),
+            family_snapshot("Entra_Users_Properties", reference - timedelta(hours=10)),
+        ]
+        status = family_change_status(
+            "Entra_Users_Properties",
+            snapshots,
+            timedelta(hours=24),
+            reference=reference,
+        )
+        section = FamilyChangeSection()
+        section.apply_status(status, reference - timedelta(hours=24))
+        self.assertIn("Latest on disk:", section.coverage_label.text())
+        self.assertNotIn("Baseline:", section.coverage_label.text())
+        self.assertEqual(status.reason, REASON_NO_BASELINE)
+
+    def test_apply_status_shows_paired_snapshots_for_valid_comparison(self):
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            status = family_change_status(
+                "Entra_Users_Properties",
+                scan_report_index(root)["Entra_Users_Properties"],
+                timedelta(hours=48),
+                reference=reference,
+            )
+            section = FamilyChangeSection()
+            section.apply_status(status, reference - timedelta(hours=48))
+            self.assertIn("Baseline:", section.coverage_label.text())
+            self.assertIn("Latest:", section.coverage_label.text())
+            self.assertFalse(section.reason_label.isVisible())
+            self.assertEqual(status.status, "changed")
 
 
 class StandaloneHistoryTests(unittest.TestCase):

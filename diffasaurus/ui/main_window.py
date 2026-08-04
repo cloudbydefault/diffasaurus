@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 from diffasaurus.core.report_history import (
     ComparisonSummary,
     ReportSnapshot,
+    aggregate_recent_changes,
     analyze_snapshot,
     common_headers,
     compare_snapshots,
@@ -46,9 +47,10 @@ from diffasaurus.core.report_history import (
 )
 from diffasaurus.core.paths import project_root
 from diffasaurus.core.settings import get_active_reports_dir
-from diffasaurus.ui.report_runner import RunScriptsDialog
+from diffasaurus.ui.report_runner import CATALOG_FAMILY_ORDER, RunScriptsDialog
 from diffasaurus.ui.source_settings import ReportSourceSettingsDialog
 from diffasaurus.ui.charts import ChangeBars, LineChart
+from diffasaurus.ui.recent_changes import RecentChangesPage
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
 
 
@@ -191,6 +193,8 @@ class DiffasaurusWindow(QMainWindow):
         self._index_generation = 0
         self._family_generation = 0
         self._comparison_generation = 0
+        self._recent_changes_generation = 0
+        self._recent_detail_generation = 0
         self._pending_family = ""
         self._preferred_metric = ""
         self._family_cancelled = threading.Event()
@@ -230,6 +234,7 @@ class DiffasaurusWindow(QMainWindow):
 
         self.nav_buttons = []
         for label in (
+            "◉   Recent changes",
             "◈   Dig site",
             "▦   Run health",
             "▤   Fossil library",
@@ -262,9 +267,11 @@ class DiffasaurusWindow(QMainWindow):
         top = QHBoxLayout()
         heading_box = QVBoxLayout()
         heading_box.setSpacing(2)
-        self.page_title = QLabel("The dig site")
+        self.page_title = QLabel("Recent changes")
         self.page_title.setStyleSheet("font-size: 28px; font-weight: 750; letter-spacing:-0.5px;")
-        self.page_subtitle = QLabel("Unearthing your Microsoft 365 history, one CSV fossil at a time.")
+        self.page_subtitle = QLabel(
+            "See what changed across every supported report since your last collections."
+        )
         self.page_subtitle.setStyleSheet(f"color:{COLORS['muted']};")
         heading_box.addWidget(self.page_title)
         heading_box.addWidget(self.page_subtitle)
@@ -275,9 +282,9 @@ class DiffasaurusWindow(QMainWindow):
         top.addWidget(self.source_badge)
         family_box = QVBoxLayout()
         family_box.setSpacing(4)
-        family_label = QLabel("REPORT FAMILY")
-        family_label.setObjectName("fieldLabel")
-        family_box.addWidget(family_label)
+        self.family_label = QLabel("REPORT FAMILY")
+        self.family_label.setObjectName("fieldLabel")
+        family_box.addWidget(self.family_label)
         self.family_combo = QComboBox()
         self.family_combo.setMinimumWidth(330)
         family_box.addWidget(self.family_combo)
@@ -295,6 +302,8 @@ class DiffasaurusWindow(QMainWindow):
         outer.addWidget(self.loading_bar)
 
         self.stack = QStackedWidget()
+        self.recent_changes_page = RecentChangesPage()
+        self.stack.addWidget(self.recent_changes_page)
         self.overview_page = self._build_overview()
         overview_scroll = QScrollArea()
         overview_scroll.setObjectName("overviewScroll")
@@ -312,6 +321,8 @@ class DiffasaurusWindow(QMainWindow):
         self.stack.addWidget(self.snapshot_explorer)
         outer.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
+        self.family_label.setVisible(False)
+        self.family_combo.setVisible(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -629,12 +640,22 @@ class DiffasaurusWindow(QMainWindow):
         self.latest_combo.currentIndexChanged.connect(self.snapshot_selection_changed)
         self.compare_button.clicked.connect(self.run_comparison)
         self.change_search.textChanged.connect(self.apply_change_filters)
+        self.recent_changes_page.period_changed.connect(self._refresh_recent_changes)
+        self.recent_changes_page.details_requested.connect(self._load_recent_details)
+        self.recent_changes_page.open_in_compare_requested.connect(self._open_recent_in_compare)
 
     def show_page(self, index: int):
         for current, button in enumerate(self.nav_buttons):
             button.setChecked(current == index)
         self.stack.setCurrentIndex(index)
+        on_recent = index == 0
+        self.family_label.setVisible(not on_recent)
+        self.family_combo.setVisible(not on_recent)
         titles = (
+            (
+                "Recent changes",
+                "See what changed across every supported report since your last collections.",
+            ),
             ("The dig site", "Unearthing your Microsoft 365 history, one CSV fossil at a time."),
             ("Scheduled run health", "See which weekday collections produced evidence—and which outputs are missing."),
             ("Fossil library", "Browse the CSV snapshots buried in your tenant timeline."),
@@ -646,8 +667,10 @@ class DiffasaurusWindow(QMainWindow):
         )
         self.page_title.setText(titles[index][0])
         self.page_subtitle.setText(titles[index][1])
-        if index == 4:
+        if index == 5:
             self.snapshot_explorer.activate()
+        if index == 0:
+            self._refresh_recent_changes()
 
     def _run_background(
         self,
@@ -740,6 +763,7 @@ class DiffasaurusWindow(QMainWindow):
         self.refresh_button.setText("Refresh")
         self._update_source_badge()
         self._refresh_run_health()
+        self._refresh_recent_changes()
         self.family_changed()
 
     def _index_failed(self, generation: int, message: str):
@@ -823,7 +847,7 @@ class DiffasaurusWindow(QMainWindow):
             self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
         self.snapshot_explorer.set_snapshots(snapshots)
-        if self.stack.currentIndex() == 4:
+        if self.stack.currentIndex() == 5:
             self.snapshot_explorer.activate()
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
@@ -1030,7 +1054,7 @@ class DiffasaurusWindow(QMainWindow):
         snapshot = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(snapshot, ReportSnapshot):
             return
-        self.show_page(4)
+        self.show_page(5)
         self.snapshot_explorer.select_snapshot(snapshot)
 
     def filter_library(self):
@@ -1108,6 +1132,79 @@ class DiffasaurusWindow(QMainWindow):
         self.compare_button.setText("Compare")
         self._hide_progress()
         QMessageBox.warning(self, "Compare snapshots", message)
+
+    def _refresh_recent_changes(self):
+        period, label = self.recent_changes_page.current_period()
+        self._recent_changes_generation += 1
+        generation = self._recent_changes_generation
+        self.recent_changes_page.show_loading()
+        self._run_background(
+            lambda families, selected_period, period_label: aggregate_recent_changes(
+                families,
+                selected_period,
+                period_label=period_label,
+                family_order=CATALOG_FAMILY_ORDER,
+            ),
+            (self.families, period, label),
+            lambda report: self._recent_changes_ready(generation, report),
+            lambda message: self._recent_changes_failed(generation, message),
+        )
+
+    def _recent_changes_ready(self, generation: int, report):
+        if generation != self._recent_changes_generation:
+            return
+        self.recent_changes_page.apply_report(report)
+
+    def _recent_changes_failed(self, generation: int, message: str):
+        if generation != self._recent_changes_generation:
+            return
+        QMessageBox.warning(self, "Recent changes", message)
+
+    def _load_recent_details(self, family: str, baseline, latest, key_column: str):
+        self._recent_detail_generation += 1
+        generation = self._recent_detail_generation
+        self._run_background(
+            compare_snapshots,
+            (baseline, latest, key_column),
+            lambda summary: self._recent_detail_ready(generation, family, summary),
+            lambda message: self._recent_detail_failed(generation, family, message),
+        )
+
+    def _recent_detail_ready(self, generation: int, family: str, summary: ComparisonSummary):
+        if generation != self._recent_detail_generation:
+            return
+        self.recent_changes_page.set_family_details(family, summary)
+
+    def _recent_detail_failed(self, generation: int, family: str, message: str):
+        if generation != self._recent_detail_generation:
+            return
+        QMessageBox.warning(self, f"Recent changes · {family}", message)
+
+    def _open_recent_in_compare(
+        self,
+        family: str,
+        baseline: ReportSnapshot,
+        latest: ReportSnapshot,
+        key_column: str,
+    ):
+        if family in self.families:
+            self.family_combo.setCurrentText(family)
+        self.show_page(4)
+        self._select_snapshot_in_combo(self.baseline_combo, baseline)
+        self._select_snapshot_in_combo(self.latest_combo, latest)
+        self.key_combo.setCurrentText(key_column)
+        self.run_comparison()
+
+    @staticmethod
+    def _select_snapshot_in_combo(combo: QComboBox, snapshot: ReportSnapshot):
+        for index in range(combo.count()):
+            item = combo.itemData(index)
+            if item == snapshot:
+                combo.setCurrentIndex(index)
+                return
+            if isinstance(item, ReportSnapshot) and item.path == snapshot.path:
+                combo.setCurrentIndex(index)
+                return
 
     def set_change_filter(self, value: str):
         self.current_filter = value

@@ -87,6 +87,19 @@ REPORT_CATALOG = {
     ),
 }
 
+FAMILY_DISPLAY_NAMES: dict[str, str] = {
+    family: title for _, (_, title, _, family) in REPORT_CATALOG.items()
+}
+
+CATALOG_FAMILY_ORDER: tuple[str, ...] = tuple(
+    family for _, (_, _, _, family) in REPORT_CATALOG.items()
+)
+
+
+def family_display_name(family: str) -> str:
+    return FAMILY_DISPLAY_NAMES.get(family, family.replace("_", " "))
+
+
 SCRIPT_PATH_ROLE = int(Qt.ItemDataRole.UserRole)
 MISSING_ROLE = SCRIPT_PATH_ROLE + 1
 

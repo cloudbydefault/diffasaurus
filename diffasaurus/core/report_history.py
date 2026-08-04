@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from diffasaurus.core.dashboard_registry import get_dashboard_definition
 from diffasaurus.core.paths import user_data_dir
@@ -18,6 +18,21 @@ from diffasaurus.models.csv_model import CsvTableModel
 
 
 TIMESTAMP_RE = re.compile(r"(?P<date>\d{8})[-_](?P<time>\d{6})$")
+
+RECENT_CHANGE_PERIODS: tuple[tuple[str, timedelta], ...] = (
+    ("24 hours", timedelta(hours=24)),
+    ("48 hours", timedelta(hours=48)),
+    ("3 days", timedelta(days=3)),
+    ("7 days", timedelta(days=7)),
+    ("15 days", timedelta(days=15)),
+    ("30 days", timedelta(days=30)),
+)
+
+REASON_NOT_ENOUGH_SNAPSHOTS = "Not enough snapshots to compare."
+REASON_STALE_LATEST = "No snapshot was collected during the selected period."
+REASON_NO_BASELINE = "No baseline snapshot exists at or before the period cutoff."
+REASON_SINGLE_SNAPSHOT = "Only one distinct snapshot spans the selected period."
+REASON_UNABLE_TO_COMPARE = "Unable to compare snapshots."
 
 PREFERRED_KEYS = (
     "UserPrincipalName",
@@ -64,6 +79,58 @@ class ComparisonSummary:
     @property
     def total_changes(self) -> int:
         return self.added + self.removed + self.changed
+
+
+@dataclass(frozen=True)
+class PeriodPairResult:
+    baseline: ReportSnapshot | None
+    latest: ReportSnapshot | None
+    reason: str
+    reference: datetime
+    cutoff: datetime
+
+
+@dataclass(frozen=True)
+class FamilyChangeStatus:
+    family: str
+    status: Literal["changed", "unchanged", "no_data"]
+    baseline: ReportSnapshot | None
+    latest: ReportSnapshot | None
+    key_column: str
+    summary: ComparisonSummary | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class RecentChangesReport:
+    period_label: str
+    reference: datetime
+    cutoff: datetime
+    families: tuple[FamilyChangeStatus, ...]
+
+    @property
+    def changed_count(self) -> int:
+        return sum(1 for item in self.families if item.status == "changed")
+
+    @property
+    def unchanged_count(self) -> int:
+        return sum(1 for item in self.families if item.status == "unchanged")
+
+    @property
+    def no_data_count(self) -> int:
+        return sum(1 for item in self.families if item.status == "no_data")
+
+    @property
+    def total_added(self) -> int:
+        return sum(item.summary.added for item in self.families if item.summary)
+
+    @property
+    def total_removed(self) -> int:
+        return sum(item.summary.removed for item in self.families if item.summary)
+
+    @property
+    def total_changed(self) -> int:
+        return sum(item.summary.changed for item in self.families if item.summary)
 
 
 @dataclass(frozen=True)
@@ -245,6 +312,23 @@ def report_run_health(
 def common_headers(baseline: ReportSnapshot, latest: ReportSnapshot) -> list[str]:
     baseline_headers = set(baseline.headers)
     return [header for header in latest.headers if header in baseline_headers]
+
+
+def snapshot_with_headers(snapshot: ReportSnapshot) -> ReportSnapshot:
+    if snapshot.headers:
+        return snapshot
+    try:
+        headers, rows = read_csv_rows(snapshot.path)
+    except Exception:
+        return snapshot
+    row_count = snapshot.row_count if snapshot.row_count >= 0 else len(rows)
+    return ReportSnapshot(
+        path=snapshot.path,
+        family=snapshot.family,
+        captured_at=snapshot.captured_at,
+        row_count=row_count,
+        headers=tuple(headers),
+    )
 
 
 def suggested_key(headers: list[str] | tuple[str, ...]) -> str:
@@ -778,6 +862,204 @@ def schema_changes(
         if added or removed:
             changes.append((latest.captured_at, added, removed))
     return changes
+
+
+def period_window(
+    period: timedelta,
+    reference: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    resolved = reference or datetime.now()
+    return resolved, resolved - period
+
+
+def resolve_period_pair(
+    snapshots: list[ReportSnapshot],
+    period: timedelta,
+    reference: datetime | None = None,
+) -> PeriodPairResult:
+    reference_at, cutoff = period_window(period, reference)
+    if not snapshots:
+        return PeriodPairResult(
+            baseline=None,
+            latest=None,
+            reason=REASON_NOT_ENOUGH_SNAPSHOTS,
+            reference=reference_at,
+            cutoff=cutoff,
+        )
+    if len(snapshots) < 2:
+        return PeriodPairResult(
+            baseline=None,
+            latest=snapshots[-1],
+            reason=REASON_NOT_ENOUGH_SNAPSHOTS,
+            reference=reference_at,
+            cutoff=cutoff,
+        )
+
+    latest = snapshots[-1]
+    if latest.captured_at <= cutoff:
+        return PeriodPairResult(
+            baseline=None,
+            latest=latest,
+            reason=REASON_STALE_LATEST,
+            reference=reference_at,
+            cutoff=cutoff,
+        )
+
+    baselines = [snapshot for snapshot in snapshots if snapshot.captured_at <= cutoff]
+    if not baselines:
+        return PeriodPairResult(
+            baseline=None,
+            latest=latest,
+            reason=REASON_NO_BASELINE,
+            reference=reference_at,
+            cutoff=cutoff,
+        )
+
+    baseline = baselines[-1]
+    if baseline.path == latest.path:
+        return PeriodPairResult(
+            baseline=baseline,
+            latest=latest,
+            reason=REASON_SINGLE_SNAPSHOT,
+            reference=reference_at,
+            cutoff=cutoff,
+        )
+
+    return PeriodPairResult(
+        baseline=baseline,
+        latest=latest,
+        reason="",
+        reference=reference_at,
+        cutoff=cutoff,
+    )
+
+
+def select_period_snapshots(
+    snapshots: list[ReportSnapshot],
+    period: timedelta,
+    reference: datetime | None = None,
+) -> tuple[ReportSnapshot, ReportSnapshot] | None:
+    result = resolve_period_pair(snapshots, period, reference)
+    if result.reason or result.baseline is None or result.latest is None:
+        return None
+    return result.baseline, result.latest
+
+
+def family_change_status(
+    family: str,
+    snapshots: list[ReportSnapshot],
+    period: timedelta,
+    reference: datetime | None = None,
+    include_details: bool = False,
+) -> FamilyChangeStatus:
+    pairing = resolve_period_pair(snapshots, period, reference)
+    if pairing.reason:
+        return FamilyChangeStatus(
+            family=family,
+            status="no_data",
+            baseline=pairing.baseline,
+            latest=pairing.latest,
+            key_column="",
+            summary=None,
+            reason=pairing.reason,
+        )
+
+    baseline = pairing.baseline
+    latest = pairing.latest
+    assert baseline is not None and latest is not None
+
+    baseline = snapshot_with_headers(baseline)
+    latest = snapshot_with_headers(latest)
+    headers = common_headers(baseline, latest)
+    key_column = suggested_key(headers)
+    if not key_column:
+        return FamilyChangeStatus(
+            family=family,
+            status="no_data",
+            baseline=baseline,
+            latest=latest,
+            key_column="",
+            summary=None,
+            reason=REASON_UNABLE_TO_COMPARE,
+        )
+
+    try:
+        if include_details:
+            summary = compare_snapshots(baseline, latest, key_column)
+        else:
+            summary = compare_snapshot_counts(baseline, latest, key_column)
+    except Exception:
+        return FamilyChangeStatus(
+            family=family,
+            status="no_data",
+            baseline=baseline,
+            latest=latest,
+            key_column=key_column,
+            summary=None,
+            reason=REASON_UNABLE_TO_COMPARE,
+        )
+
+    status: Literal["changed", "unchanged"] = (
+        "changed" if summary.total_changes else "unchanged"
+    )
+    return FamilyChangeStatus(
+        family=family,
+        status=status,
+        baseline=baseline,
+        latest=latest,
+        key_column=key_column,
+        summary=summary,
+        reason="",
+    )
+
+
+def _recent_changes_sort_key(item: FamilyChangeStatus) -> tuple[int, str]:
+    status_rank = {"changed": 0, "unchanged": 1, "no_data": 2}
+    return status_rank.get(item.status, 3), item.family.lower()
+
+
+def aggregate_recent_changes(
+    families: dict[str, list[ReportSnapshot]],
+    period: timedelta,
+    reference: datetime | None = None,
+    period_label: str = "",
+    family_order: tuple[str, ...] | None = None,
+    include_details: bool = False,
+) -> RecentChangesReport:
+    reference_at, cutoff = period_window(period, reference)
+    catalog = list(family_order or ())
+    catalog_set = set(catalog)
+    ordered_families = [
+        family for family in catalog if families.get(family)
+    ]
+    ordered_families.extend(
+        sorted(family for family in families if family not in catalog_set)
+    )
+
+    results: list[FamilyChangeStatus] = []
+    for family in ordered_families:
+        snapshots = families[family]
+        results.append(
+            family_change_status(
+                family,
+                snapshots,
+                period,
+                reference=reference_at,
+                include_details=include_details,
+            )
+        )
+
+    results.sort(key=_recent_changes_sort_key)
+    label = period_label or next(
+        (name for name, value in RECENT_CHANGE_PERIODS if value == period),
+        str(period),
+    )
+    return RecentChangesReport(
+        period_label=label,
+        reference=reference_at,
+        cutoff=cutoff,
+        families=tuple(results),
+    )
 
 
 def recent_movement(
