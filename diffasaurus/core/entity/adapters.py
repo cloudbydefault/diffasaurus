@@ -32,6 +32,7 @@ class ReportFamilyAdapter:
     row_scope_columns: tuple[str, ...] = ()
     card_columns: tuple[str, ...] = ()
     fallback_key: Callable[[dict[str, str], str], str | None] | None = None
+    authoritative_inventory: bool = False
 
     def canonical_value(self, row: dict[str, str]) -> str:
         for column in self.canonical_columns:
@@ -116,6 +117,7 @@ def _mailbox_smtp_fallback(row: dict[str, str], family: str) -> str | None:
 USER_PROPERTIES = ReportFamilyAdapter(
     family="Entra_Users_Properties",
     entity_type="user",
+    authoritative_inventory=True,
     canonical_columns=("Id",),
     alias_columns=(
         AliasColumn("upn", "UPN"),
@@ -195,6 +197,7 @@ USER_ACCESS_ASSIGNMENTS = ReportFamilyAdapter(
 DEVICE_MANAGED = ReportFamilyAdapter(
     family="Intune_ManagedDevices_Compliance",
     entity_type="device",
+    authoritative_inventory=True,
     canonical_columns=("AzureADDeviceId",),
     alias_columns=(
         AliasColumn("serial_number", "SerialNumber"),
@@ -258,6 +261,7 @@ DEVICE_IOS = ReportFamilyAdapter(
 MAILBOX_SHARED = ReportFamilyAdapter(
     family="Exchange_SharedMailboxes",
     entity_type="shared_mailbox",
+    authoritative_inventory=True,
     canonical_columns=("ExternalDirectoryObjectId",),
     alias_columns=(
         AliasColumn("primary_smtp", "PrimarySmtpAddress"),

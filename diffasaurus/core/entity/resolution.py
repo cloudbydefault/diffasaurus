@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import logging
+import time
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime
 
 from diffasaurus.core.entity.adapters import ReportFamilyAdapter
+from diffasaurus.core.entity.bindings import AliasBindingIndex
+from diffasaurus.core.entity.history import (
+    _BINDING_FAMILIES,
+    _extract_upn,
+    row_entity_key,
+)
 from diffasaurus.core.entity.registry import ADAPTERS_BY_FAMILY
 from diffasaurus.core.entity.snapshots import load_snapshot_rows
 from diffasaurus.core.entity.types import (
     CanonicalEntityKey,
+    EntityIndexStats,
     EntityRecord,
     EntityType,
     SourcedProperty,
@@ -15,7 +25,11 @@ from diffasaurus.core.entity.types import (
 )
 from diffasaurus.core.report_history import ReportSnapshot
 
-_BINDING_FAMILIES = {"Entra_Users_Properties", "Entra_Users_Activity"}
+logger = logging.getLogger(__name__)
+
+
+class EntityIndexCancelled(Exception):
+    """Raised when entity indexing is interrupted before completion."""
 
 
 def _row_value(row: dict[str, str], column: str) -> str:
@@ -43,38 +57,92 @@ class EntityResolver:
     def get(self, key: CanonicalEntityKey) -> EntityRecord | None:
         return self._records.get(key.label())
 
-    def build_index(self, families: dict[str, list[ReportSnapshot]]) -> None:
+    def build_index(
+        self,
+        families: dict[str, list[ReportSnapshot]],
+        cancelled: threading.Event | None = None,
+        stats: EntityIndexStats | None = None,
+    ) -> None:
+        started = time.perf_counter()
+        binding_started = time.perf_counter()
         self._records.clear()
-        upn_bindings: dict[tuple[str, datetime], str] = {}
+        alias_index = AliasBindingIndex()
         latest_keys: dict[str, set[str]] = {}
 
+        def _check_cancelled() -> None:
+            if cancelled is not None and cancelled.is_set():
+                raise EntityIndexCancelled()
+
+        def _load_rows(snapshot: ReportSnapshot) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+            if stats is not None:
+                stats.snapshots_scanned += 1
+            return load_snapshot_rows(snapshot, stats)
+
+        def _process_snapshot(
+            family: str,
+            adapter: ReportFamilyAdapter,
+            snapshot: ReportSnapshot,
+            latest_snapshot: ReportSnapshot,
+            record_bindings: bool,
+        ) -> None:
+            _check_cancelled()
+            _, rows = _load_rows(snapshot)
+            for row in rows:
+                if record_bindings:
+                    user_id = adapter.canonical_value(row)
+                    upn = _extract_upn(adapter, row)
+                    if user_id and upn:
+                        alias_index.record(
+                            "upn",
+                            upn.lower(),
+                            snapshot.captured_at,
+                            user_id,
+                            adapter.family,
+                        )
+                key = row_entity_key(adapter, row, snapshot.captured_at, alias_index)
+                if key is None:
+                    continue
+                record = self._records.setdefault(
+                    key.label(),
+                    EntityRecord(key=key, display_name=adapter.display_name(row)),
+                )
+                self._touch_record(record, adapter, row, snapshot.captured_at)
+                if snapshot.path == latest_snapshot.path:
+                    latest_keys[family].add(key.label())
+
+        for family in _BINDING_FAMILIES:
+            adapter = ADAPTERS_BY_FAMILY.get(family)
+            snapshots = families.get(family, [])
+            if not adapter or not snapshots:
+                continue
+            latest_keys[family] = set()
+            latest_snapshot = snapshots[-1]
+            for snapshot in snapshots:
+                _process_snapshot(family, adapter, snapshot, latest_snapshot, record_bindings=True)
+
+        if stats is not None:
+            stats.binding_seconds = time.perf_counter() - binding_started
+
         for family, snapshots in families.items():
+            if family in _BINDING_FAMILIES:
+                continue
             adapter = ADAPTERS_BY_FAMILY.get(family)
             if not adapter or not snapshots:
                 continue
             latest_keys[family] = set()
             latest_snapshot = snapshots[-1]
             for snapshot in snapshots:
-                _, rows = load_snapshot_rows(snapshot)
-                for row in rows:
-                    if family in _BINDING_FAMILIES:
-                        self._record_upn_binding(row, adapter, snapshot.captured_at, upn_bindings)
-                    key = self._resolve_row_key(adapter, row, snapshot.captured_at, upn_bindings)
-                    if key is None:
-                        continue
-                    record = self._records.setdefault(
-                        key.label(),
-                        EntityRecord(key=key, display_name=adapter.display_name(row)),
-                    )
-                    self._touch_record(record, adapter, row, snapshot.captured_at)
-                    if snapshot.path == latest_snapshot.path:
-                        latest_keys[family].add(key.label())
+                _process_snapshot(family, adapter, snapshot, latest_snapshot, record_bindings=False)
 
         for record in self._records.values():
             record.present_in_latest = any(
                 record.key.label() in latest_keys.get(family, set())
                 for family in record.source_families
             )
+
+        if stats is not None:
+            stats.entity_count = len(self._records)
+            stats.total_seconds = time.perf_counter() - started
 
     def search(self, query: str, entity_type: EntityType) -> SearchResult:
         needle = query.strip().lower()
@@ -112,46 +180,6 @@ class EntityResolver:
             if any(needle in alias.value.lower() for alias in record.aliases)
         )
         return alias_hits > 1
-
-    def _resolve_row_key(
-        self,
-        adapter: ReportFamilyAdapter,
-        row: dict[str, str],
-        observed_at: datetime,
-        upn_bindings: dict[tuple[str, datetime], str],
-    ) -> CanonicalEntityKey | None:
-        key = adapter.build_key(row)
-        if key is None:
-            return None
-
-        if key.entity_type == "user" and key.primary_id.startswith("upn_only:"):
-            upn = self._extract_upn(adapter, row)
-            if upn:
-                bound = upn_bindings.get((upn.lower(), observed_at))
-                if bound:
-                    return CanonicalEntityKey("user", bound)
-
-        return key
-
-    def _extract_upn(self, adapter: ReportFamilyAdapter, row: dict[str, str]) -> str:
-        for alias in adapter.alias_columns:
-            if alias.kind == "upn":
-                value = _row_value(row, alias.column)
-                if value:
-                    return value
-        return ""
-
-    def _record_upn_binding(
-        self,
-        row: dict[str, str],
-        adapter: ReportFamilyAdapter,
-        observed_at: datetime,
-        upn_bindings: dict[tuple[str, datetime], str],
-    ) -> None:
-        user_id = adapter.canonical_value(row)
-        upn = self._extract_upn(adapter, row)
-        if user_id and upn:
-            upn_bindings[(upn.lower(), observed_at)] = user_id
 
     def _touch_record(
         self,
@@ -217,7 +245,22 @@ class EntityResolver:
         )
 
 
-def build_entity_resolver(families: dict[str, list[ReportSnapshot]]) -> EntityResolver:
+def build_entity_resolver(
+    families: dict[str, list[ReportSnapshot]],
+    cancelled: threading.Event | None = None,
+    stats: EntityIndexStats | None = None,
+) -> EntityResolver:
     resolver = EntityResolver()
-    resolver.build_index(families)
+    resolver.build_index(families, cancelled=cancelled, stats=stats)
+    if stats is not None:
+        logger.info(
+            "Entity index: %d snapshots, %d parsed, %d cache hits, "
+            "%d entities, %.1fs total (binding %.1fs)",
+            stats.snapshots_scanned,
+            stats.csv_parsed,
+            stats.csv_cache_hits,
+            stats.entity_count,
+            stats.total_seconds,
+            stats.binding_seconds,
+        )
     return resolver

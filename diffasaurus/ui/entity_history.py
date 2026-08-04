@@ -1,21 +1,17 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
-    QCompleter,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -31,9 +27,10 @@ from PyQt6.QtWidgets import (
 
 from diffasaurus.core.entity.history import build_entity_period_changes
 from diffasaurus.core.entity.registry import ADAPTERS_BY_FAMILY
-from diffasaurus.core.entity.resolution import EntityResolver, SearchResult, build_entity_resolver
-from diffasaurus.core.entity.types import EntityChangeEvent, EntityRecord, EntityType, SourcedProperty
+from diffasaurus.core.entity.resolution import EntityResolver, build_entity_resolver
+from diffasaurus.core.entity.types import EntityChangeEvent, EntityIndexStats, EntityRecord, SourcedProperty
 from diffasaurus.core.report_history import ReportSnapshot
+from diffasaurus.ui.entity_search import ENTITY_TYPE_LABELS, EntitySelectorPanel
 from diffasaurus.ui.period_selector import PeriodSelector
 from diffasaurus.ui.report_runner import family_display_name
 
@@ -49,14 +46,6 @@ COLORS = {
     "amber": "#f5b942",
     "blue": "#65a9ff",
 }
-
-ENTITY_TYPE_LABELS: dict[EntityType, str] = {
-    "user": "User",
-    "device": "Device",
-    "shared_mailbox": "Shared mailbox",
-}
-
-ENTITY_TYPE_ORDER: tuple[EntityType, ...] = ("user", "device", "shared_mailbox")
 
 CHANGES_TABLE_MIN_HEIGHT = 220
 SPLITTER_CARD_STRETCH = 45
@@ -227,12 +216,12 @@ class EntityHistoryPage(QWidget):
     entity_selected = pyqtSignal(object)
     period_changed = pyqtSignal(object, str)
     refresh_requested = pyqtSignal()
+    view_at_date_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._resolver: EntityResolver | None = None
         self._selected: EntityRecord | None = None
-        self._search_result: SearchResult | None = None
         self._period_changes = None
         self._family_sections: list[FamilyPropertySection] = []
 
@@ -242,58 +231,22 @@ class EntityHistoryPage(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(12)
-        type_box = QVBoxLayout()
-        type_box.setSpacing(4)
-        type_label = QLabel("ENTITY TYPE")
-        type_label.setObjectName("fieldLabel")
-        self.type_combo = QComboBox()
-        self.type_combo.setMinimumWidth(150)
-        for entity_type in ENTITY_TYPE_ORDER:
-            self.type_combo.addItem(ENTITY_TYPE_LABELS[entity_type], entity_type)
-        type_box.addWidget(type_label)
-        type_box.addWidget(self.type_combo)
-        controls.addLayout(type_box)
-
-        search_box = QVBoxLayout()
-        search_box.setSpacing(4)
-        search_label = QLabel("SEARCH")
-        search_label.setObjectName("fieldLabel")
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("ID, UPN, device name, serial, SMTP address…")
-        self._completer_model = QStringListModel()
-        self._completer = QCompleter(self._completer_model)
-        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.search_input.setCompleter(self._completer)
-        search_box.addWidget(search_label)
-        search_box.addWidget(self.search_input)
-        controls.addLayout(search_box, 1)
+        self.entity_selector = EntitySelectorPanel()
+        controls.addWidget(self.entity_selector, 2)
 
         self.period_selector = PeriodSelector()
         controls.addWidget(self.period_selector)
 
         refresh_box = QVBoxLayout()
         refresh_box.setSpacing(4)
-        refresh_spacer = QLabel("")
+        refresh_spacer = QLabel(" ")
         refresh_spacer.setObjectName("fieldLabel")
-        refresh_spacer.setText(" ")
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setObjectName("secondaryButton")
         refresh_box.addWidget(refresh_spacer)
         refresh_box.addWidget(self.refresh_button)
         controls.addLayout(refresh_box)
         layout.addLayout(controls)
-
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 12px;")
-        self.status_label.setWordWrap(True)
-        self.status_label.hide()
-        layout.addWidget(self.status_label)
-
-        self.disambiguation = QListWidget()
-        self.disambiguation.setObjectName("disambiguationList")
-        self.disambiguation.setMaximumHeight(120)
-        self.disambiguation.hide()
-        layout.addWidget(self.disambiguation)
 
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.setObjectName("entityHistorySplitter")
@@ -306,8 +259,14 @@ class EntityHistoryPage(QWidget):
         card_panel_layout.setContentsMargins(16, 14, 16, 12)
         card_panel_layout.setSpacing(10)
 
+        card_header = QHBoxLayout()
         self.card_title = QLabel("Search for an entity")
         self.card_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        self.view_at_date_button = QPushButton("View at date")
+        self.view_at_date_button.setObjectName("secondaryButton")
+        self.view_at_date_button.setEnabled(False)
+        card_header.addWidget(self.card_title, 1)
+        card_header.addWidget(self.view_at_date_button)
         self.card_subtitle = QLabel("")
         self.card_subtitle.setStyleSheet(f"color: {COLORS['muted']}; font-size: 12px;")
         self.card_banner = QLabel("")
@@ -359,7 +318,7 @@ class EntityHistoryPage(QWidget):
         self.properties_layout.addStretch()
         self.properties_scroll.setWidget(self.properties_host)
 
-        card_panel_layout.addWidget(self.card_title)
+        card_panel_layout.addLayout(card_header)
         card_panel_layout.addWidget(self.card_subtitle)
         card_panel_layout.addWidget(self.card_banner)
         card_panel_layout.addLayout(meta_grid)
@@ -416,11 +375,15 @@ class EntityHistoryPage(QWidget):
         self.splitter.setSizes(list(DEFAULT_SPLITTER_SIZES))
         layout.addWidget(self.splitter, 1)
 
-        self.type_combo.currentIndexChanged.connect(self._entity_type_changed)
-        self.search_input.returnPressed.connect(self._run_search)
-        self.disambiguation.itemClicked.connect(self._pick_disambiguation)
         self.period_selector.period_changed.connect(self._emit_period_changed)
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        self.entity_selector.entity_selected.connect(self._select_entity)
+        self.view_at_date_button.clicked.connect(self._emit_view_at_date)
+
+        self.type_combo = self.entity_selector.type_combo
+        self.search_input = self.entity_selector.search_input
+        self.disambiguation = self.entity_selector.disambiguation
+        self.status_label = self.entity_selector.status_label
 
     @staticmethod
     def _meta_caption(text: str) -> QLabel:
@@ -430,8 +393,8 @@ class EntityHistoryPage(QWidget):
         )
         return label
 
-    def current_entity_type(self) -> EntityType:
-        return self.type_combo.currentData()
+    def current_entity_type(self):
+        return self.entity_selector.current_entity_type()
 
     def current_period(self) -> tuple[timedelta, str]:
         return self.period_selector.current_period()
@@ -445,94 +408,33 @@ class EntityHistoryPage(QWidget):
     def set_resolver(self, resolver: EntityResolver) -> None:
         self._resolver = resolver
         self._selected = None
-        self._search_result = None
-        self._update_completer()
+        self.entity_selector.set_resolver(resolver)
         self._clear_card()
         self._clear_changes()
-        self.disambiguation.hide()
-        self.status_label.setText("Index ready. Search by ID, alias, or display name.")
-        self.status_label.show()
+        self.view_at_date_button.setEnabled(False)
 
     def show_indexing(self) -> None:
-        self.status_label.setText("Building entity index from all snapshots…")
-        self.status_label.show()
-        self._clear_card()
-        self.disambiguation.hide()
-        self._clear_changes()
-
-    def _entity_type_changed(self) -> None:
-        self._selected = None
-        self._search_result = None
-        self.disambiguation.hide()
-        self._update_completer()
+        self.entity_selector.show_indexing()
         self._clear_card()
         self._clear_changes()
-        self.search_input.clear()
+        self.view_at_date_button.setEnabled(False)
 
-    def _update_completer(self) -> None:
-        if not self._resolver:
-            self._completer_model.setStringList([])
-            return
-        entity_type = self.current_entity_type()
-        suggestions: list[str] = []
-        for record in self._resolver.records:
-            if record.key.entity_type != entity_type:
-                continue
-            suggestions.append(record.display_name)
-            suggestions.append(record.key.primary_id)
-            for alias in record.aliases:
-                suggestions.append(alias.value)
-        unique = sorted({value for value in suggestions if value}, key=str.lower)
-        self._completer_model.setStringList(unique[:2_000])
-
-    def _run_search(self) -> None:
-        if not self._resolver:
-            return
-        query = self.search_input.text().strip()
-        if not query:
-            return
-        result = self._resolver.search(query, self.current_entity_type())
-        self._search_result = result
-        self.disambiguation.hide()
-        if not result.matches:
-            self._selected = None
-            self._clear_card()
-            self._clear_changes()
-            self.status_label.setText(
-                f"No {ENTITY_TYPE_LABELS[self.current_entity_type()].lower()} found for “{query}”."
-            )
-            self.status_label.show()
-            return
-        if result.ambiguous and len(result.matches) > 1:
-            self._show_disambiguation(result)
-            return
-        self._select_entity(result.matches[0])
-
-    def _show_disambiguation(self, result: SearchResult) -> None:
-        self.disambiguation.clear()
-        for record in result.matches:
-            item = QListWidgetItem(
-                f"{record.display_name} · {record.key.primary_id} · last seen "
-                f"{record.last_seen.strftime('%d %b %Y') if record.last_seen else '—'}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, record)
-            self.disambiguation.addItem(item)
-        self.disambiguation.show()
-        self.status_label.setText("Multiple entities match this search. Choose one below.")
-        self.status_label.show()
+    def show_index_error(self, message: str) -> None:
+        self.entity_selector.show_index_error(message)
         self._clear_card()
-
-    def _pick_disambiguation(self, item: QListWidgetItem) -> None:
-        record = item.data(Qt.ItemDataRole.UserRole)
-        if record:
-            self.disambiguation.hide()
-            self._select_entity(record)
+        self._clear_changes()
+        self.view_at_date_button.setEnabled(False)
 
     def _select_entity(self, record: EntityRecord) -> None:
         self._selected = record
         self.entity_selected.emit(record)
         self._render_card(record)
         self._load_period_changes(record)
+        self.view_at_date_button.setEnabled(True)
+
+    def _emit_view_at_date(self) -> None:
+        if self._selected:
+            self.view_at_date_requested.emit(self._selected)
 
     def _clear_property_sections(self) -> None:
         while self.properties_layout.count():
@@ -543,7 +445,6 @@ class EntityHistoryPage(QWidget):
         self._family_sections.clear()
 
     def _render_card(self, record: EntityRecord) -> None:
-        self.status_label.hide()
         self.card_title.setText(record.display_name)
         self.card_subtitle.setText(
             f"{ENTITY_TYPE_LABELS[record.key.entity_type]} · {record.key.primary_id}"
@@ -641,8 +542,12 @@ class EntityHistoryPage(QWidget):
         self.changes_caption.setText("Loading changes…")
 
     @staticmethod
-    def build_resolver(families: dict[str, list[ReportSnapshot]]) -> EntityResolver:
-        return build_entity_resolver(families)
+    def build_resolver(
+        families: dict[str, list[ReportSnapshot]],
+        cancelled: threading.Event | None = None,
+        stats: EntityIndexStats | None = None,
+    ) -> EntityResolver:
+        return build_entity_resolver(families, cancelled=cancelled, stats=stats)
 
     @staticmethod
     def compute_period_changes(

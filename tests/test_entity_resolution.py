@@ -270,6 +270,154 @@ class EntityResolutionTests(unittest.TestCase):
             self.assertEqual(props["PrimarySmtpAddress"], "finance@example.com")
             self.assertEqual(props["FullAccessDelegates"], "ada@example.com")
 
+    def test_temporal_upn_binding_resolves_auth_row_after_properties(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260804-040000.csv",
+                [
+                    {
+                        "Id": "user-1",
+                        "UPN": "ada@example.com",
+                        "DisplayName": "Ada",
+                    }
+                ],
+            )
+            write_report(
+                root / "Entra_Users_AuthenticationMethods_20260804-040500.csv",
+                [
+                    {
+                        "UPN": "ada@example.com",
+                        "DisplayName": "Ada",
+                        "IsMfaRegistered": "True",
+                        "DefaultMfaMethod": "Authenticator",
+                    }
+                ],
+            )
+            resolver = build_entity_resolver(self._families(root))
+            record = resolver.get(CanonicalEntityKey("user", "user-1"))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertIn("Entra_Users_AuthenticationMethods", record.source_families)
+
+    def test_future_upn_binding_not_used_for_older_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260804-040000.csv",
+                [
+                    {
+                        "Id": "user-1",
+                        "UPN": "old@example.com",
+                        "DisplayName": "Ada",
+                    }
+                ],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-060000.csv",
+                [
+                    {
+                        "Id": "user-2",
+                        "UPN": "old@example.com",
+                        "DisplayName": "Other",
+                    }
+                ],
+            )
+            write_report(
+                root / "Entra_Users_AuthenticationMethods_20260804-040500.csv",
+                [
+                    {
+                        "UPN": "old@example.com",
+                        "DisplayName": "Ada",
+                        "IsMfaRegistered": "True",
+                    }
+                ],
+            )
+            resolver = build_entity_resolver(self._families(root))
+            record = resolver.get(CanonicalEntityKey("user", "user-1"))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertIn("Entra_Users_AuthenticationMethods", record.source_families)
+            other = resolver.get(CanonicalEntityKey("user", "user-2"))
+            self.assertIsNotNone(other)
+            assert other is not None
+            self.assertNotIn("Entra_Users_AuthenticationMethods", other.source_families)
+
+    def test_renamed_upn_resolves_correct_user_before_and_after_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260701-010000.csv",
+                [
+                    {
+                        "Id": "user-1",
+                        "UPN": "old@example.com",
+                        "DisplayName": "Ada",
+                    }
+                ],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260801-010000.csv",
+                [
+                    {
+                        "Id": "user-1",
+                        "UPN": "new@example.com",
+                        "DisplayName": "Ada",
+                    }
+                ],
+            )
+            write_report(
+                root / "Entra_Users_AuthenticationMethods_20260715-010000.csv",
+                [
+                    {
+                        "UPN": "old@example.com",
+                        "DisplayName": "Ada",
+                        "IsMfaRegistered": "True",
+                    }
+                ],
+            )
+            resolver = build_entity_resolver(self._families(root))
+            record = resolver.get(CanonicalEntityKey("user", "user-1"))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertIn("Entra_Users_AuthenticationMethods", record.source_families)
+
+    def test_recycled_upn_with_ambiguous_candidates_not_auto_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260804-040000.csv",
+                [
+                    {
+                        "Id": "user-1",
+                        "UPN": "shared@example.com",
+                        "DisplayName": "First",
+                    },
+                    {
+                        "Id": "user-2",
+                        "UPN": "shared@example.com",
+                        "DisplayName": "Second",
+                    },
+                ],
+            )
+            write_report(
+                root / "Entra_Users_AuthenticationMethods_20260804-040500.csv",
+                [
+                    {
+                        "UPN": "shared@example.com",
+                        "DisplayName": "Ambiguous",
+                        "IsMfaRegistered": "False",
+                    }
+                ],
+            )
+            resolver = build_entity_resolver(self._families(root))
+            auth_only = [
+                record
+                for record in resolver.records
+                if "Entra_Users_AuthenticationMethods" in record.source_families
+            ]
+            self.assertEqual(len(auth_only), 0)
+
 
 class EntityResolutionUiTests(unittest.TestCase):
     @classmethod
@@ -300,6 +448,6 @@ class EntityResolutionUiTests(unittest.TestCase):
         )
         from diffasaurus.core.entity.resolution import SearchResult
 
-        page._show_disambiguation(SearchResult((first, second), True))
+        page.entity_selector._show_disambiguation(SearchResult((first, second), True))
         self.assertEqual(page.disambiguation.count(), 2)
         self.assertFalse(page.disambiguation.isHidden())
