@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 EntityType = Literal["user", "device", "shared_mailbox"]
+
+
+@dataclass
+class EntityIndexStats:
+    snapshots_scanned: int = 0
+    csv_parsed: int = 0
+    csv_cache_hits: int = 0
+    binding_seconds: float = 0.0
+    total_seconds: float = 0.0
+    entity_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,9 +78,51 @@ class EntityPeriodChanges:
     covered_to: datetime
 
 
+FamilyCoverageStatus = Literal[
+    "snapshot_used",
+    "entity_absent",
+    "no_snapshot",
+    "not_applicable",
+]
+
+EntityPresenceStatus = Literal["present", "absent", "unknown", "partial"]
+
+
+@dataclass(frozen=True)
+class FamilyCoverage:
+    family: str
+    status: FamilyCoverageStatus
+    requested_at: datetime
+    snapshot_at: datetime | None
+    gap: timedelta | None
+    entity_present: bool
+
+
+@dataclass(frozen=True)
+class ScopedRelationship:
+    family: str
+    row_scope: str
+    properties: tuple[SourcedProperty, ...]
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class EntityStateDiff:
+    added_properties: tuple[tuple[str, str, str], ...] = ()
+    removed_properties: tuple[tuple[str, str, str], ...] = ()
+    modified_properties: tuple[tuple[str, str, str, str, str], ...] = ()
+    added_relationships: tuple[tuple[str, str], ...] = ()
+    removed_relationships: tuple[tuple[str, str], ...] = ()
+    modified_relationships: tuple[tuple[str, str, str, str], ...] = ()
+
+
 @dataclass(frozen=True)
 class EntityState:
     as_of: datetime
     key: CanonicalEntityKey
     properties_by_family: dict[str, tuple[SourcedProperty, ...]]
     family_coverage: dict[str, str]
+    coverage: tuple[FamilyCoverage, ...] = ()
+    presence: EntityPresenceStatus = "unknown"
+    scalar_properties_by_family: dict[str, tuple[SourcedProperty, ...]] = field(default_factory=dict)
+    relationships_by_family: dict[str, tuple[ScopedRelationship, ...]] = field(default_factory=dict)

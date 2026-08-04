@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from diffasaurus.core.entity.types import EntityIndexStats
 from diffasaurus.core.report_history import ReportSnapshot, read_csv_rows, snapshot_with_headers
 
 
@@ -16,9 +17,14 @@ def _cache_key(snapshot: ReportSnapshot) -> tuple[str, int, int] | None:
     return (str(snapshot.path.resolve()), stat.st_size, stat.st_mtime_ns)
 
 
-def load_snapshot_rows(snapshot: ReportSnapshot) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+def load_snapshot_rows(
+    snapshot: ReportSnapshot,
+    stats: EntityIndexStats | None = None,
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     key = _cache_key(snapshot)
     if key is not None and key in _PARSE_CACHE:
+        if stats is not None:
+            stats.csv_cache_hits += 1
         return _PARSE_CACHE[key]
 
     hydrated = snapshot_with_headers(snapshot)
@@ -26,6 +32,8 @@ def load_snapshot_rows(snapshot: ReportSnapshot) -> tuple[tuple[str, ...], list[
     result = (tuple(headers), rows)
     if key is not None:
         _PARSE_CACHE[key] = result
+    if stats is not None:
+        stats.csv_parsed += 1
     return result
 
 

@@ -1,11 +1,23 @@
-from diffasaurus.core.entity.history import build_entity_period_changes, reconstruct_entity_state
+from diffasaurus.core.entity.history import (
+    build_entity_period_changes,
+    build_alias_binding_index,
+    compare_entity_states,
+    entity_rows_at,
+    present_at_target,
+    reconstruct_entity_state,
+)
 from diffasaurus.core.entity.resolution import EntityResolver, SearchResult
 from diffasaurus.core.entity.types import (
     CanonicalEntityKey,
     EntityChangeEvent,
     EntityPeriodChanges,
+    EntityPresenceStatus,
     EntityRecord,
+    EntityState,
+    EntityStateDiff,
     EntityType,
+    FamilyCoverage,
+    ScopedRelationship,
     SourcedProperty,
     TimedAlias,
 )
@@ -14,12 +26,21 @@ __all__ = [
     "CanonicalEntityKey",
     "EntityChangeEvent",
     "EntityPeriodChanges",
+    "EntityPresenceStatus",
     "EntityRecord",
     "EntityResolver",
+    "EntityState",
+    "EntityStateDiff",
     "EntityType",
+    "FamilyCoverage",
+    "ScopedRelationship",
     "SearchResult",
     "SourcedProperty",
     "TimedAlias",
+    "build_alias_binding_index",
     "build_entity_period_changes",
+    "compare_entity_states",
+    "entity_rows_at",
+    "present_at_target",
     "reconstruct_entity_state",
 ]
