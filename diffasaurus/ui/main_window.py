@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +32,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from diffasaurus.core.entity.feature import persistent_entity_index_enabled
+from diffasaurus.core.entity.index_paths import entity_index_path, normalize_reports_path, source_key
 from diffasaurus.core.entity.history import reconstruct_entity_state
 from diffasaurus.core.entity.resolution import EntityIndexCancelled, build_entity_resolver
 from diffasaurus.core.entity.types import EntityIndexStats
@@ -56,6 +61,8 @@ from diffasaurus.ui.charts import ChangeBars, LineChart
 from diffasaurus.ui.entity_history import EntityHistoryPage
 from diffasaurus.ui.point_in_time import PointInTimePage
 from diffasaurus.ui.recent_changes import RecentChangesPage
+from diffasaurus.ui.entity_index_controller import EntityIndexController
+from diffasaurus.ui.progress_coordinator import ProgressCoordinator
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
 
 
@@ -74,16 +81,48 @@ COLORS = {
 DETAIL_TABLE_LIMIT = 2_000
 ENTITY_INDEX_SHUTDOWN_WAIT_MS = 3_000
 
+logger = logging.getLogger(__name__)
+
 
 def _build_entity_index_task(
     families: dict[str, list[ReportSnapshot]],
     cancelled: threading.Event,
+    progress=None,
 ):
+    family_count = len(families)
+    snapshot_count = sum(len(snapshots) for snapshots in families.values())
+    started = time.perf_counter()
     stats = EntityIndexStats()
+    logger.info(
+        "Legacy entity index build started: %d families, %d snapshots",
+        family_count,
+        snapshot_count,
+    )
     try:
-        resolver = build_entity_resolver(families, cancelled=cancelled, stats=stats)
+        resolver = build_entity_resolver(
+            families,
+            cancelled=cancelled,
+            stats=stats,
+            progress=progress,
+        )
     except EntityIndexCancelled:
+        logger.info(
+            "Legacy entity index build cancelled after %.1fs (%d/%d snapshots)",
+            time.perf_counter() - started,
+            stats.snapshots_scanned,
+            snapshot_count,
+        )
         return None
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "Legacy entity index build finished in %.1fs: %d entities, "
+        "%d parsed, %d cache hits, %d snapshots",
+        elapsed,
+        stats.entity_count,
+        stats.csv_parsed,
+        stats.csv_cache_hits,
+        stats.snapshots_scanned,
+    )
     return resolver, stats
 
 
@@ -207,7 +246,11 @@ class DiffasaurusWindow(QMainWindow):
         self.current_filter = "All"
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
+        self._entity_index_pool = QThreadPool(self)
+        self._entity_index_pool.setMaxThreadCount(1)
         self._workers: set[BackgroundTask] = set()
+        self._entity_index_workers: set[BackgroundTask] = set()
+        self._entity_index_worker: BackgroundTask | None = None
         self._index_generation = 0
         self._family_generation = 0
         self._comparison_generation = 0
@@ -220,8 +263,23 @@ class DiffasaurusWindow(QMainWindow):
         self._entity_resolver = None
         self._entity_resolver_index_generation = -1
         self._entity_index_building = False
+        self._entity_index_target_report_generation = -1
         self._entity_index_cancelled = threading.Event()
         self._entity_index_cancelled.set()
+        self._persistent_entity_index = persistent_entity_index_enabled()
+        logger.info(
+            "Entity index mode: %s",
+            "persistent SQLite" if self._persistent_entity_index else "legacy in-memory",
+        )
+        self._progress_coordinator = ProgressCoordinator()
+        self._entity_index_controller: EntityIndexController | None = None
+        if self._persistent_entity_index:
+            self._entity_index_controller = EntityIndexController(self)
+            self._entity_index_controller.progress.connect(self._entity_sync_progress)
+            self._entity_index_controller.finished.connect(self._entity_sync_finished)
+            self._entity_index_controller.failed.connect(self._entity_sync_failed)
+            self._progress_coordinator.set_global_handler(self._coordinated_show_progress)
+            self._progress_coordinator.set_entity_handler(self._entity_sync_detail)
         self._pending_family = ""
         self._preferred_metric = ""
         self._family_cancelled = threading.Event()
@@ -231,6 +289,16 @@ class DiffasaurusWindow(QMainWindow):
         self._family_timer.timeout.connect(self._start_family_analysis)
         self._build_ui()
         self._wire()
+        if self._persistent_entity_index and self._entity_index_controller is not None:
+            self._log_persistent_entity_index_paths(self.report_dir)
+            repository = self._entity_index_controller.open_existing(self.report_dir)
+            if repository is not None:
+                self._apply_entity_repository(repository)
+            else:
+                self._request_persistent_entity_sync(
+                    cold=True,
+                    reason="missing database on startup",
+                )
         self.refresh_history()
 
     def _build_ui(self):
@@ -679,11 +747,11 @@ class DiffasaurusWindow(QMainWindow):
         self.entity_history_page.period_changed.connect(self._refresh_entity_period_changes)
         self.entity_history_page.entity_selected.connect(self._refresh_entity_period_changes)
         self.entity_history_page.refresh_requested.connect(
-            lambda: self._start_entity_index_build(force=True)
+            lambda: self._ensure_entity_index(force=True, user_requested=True)
         )
         self.entity_history_page.view_at_date_requested.connect(self._open_point_in_time)
         self.point_in_time_page.refresh_requested.connect(
-            lambda: self._start_entity_index_build(force=True)
+            lambda: self._ensure_entity_index(force=True, user_requested=True)
         )
         self.point_in_time_page.reconstruct_requested.connect(self._reconstruct_point_in_time)
 
@@ -754,6 +822,31 @@ class DiffasaurusWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self._workers.discard(worker))
         self.thread_pool.start(worker)
 
+    def _run_entity_index_background(
+        self,
+        function,
+        args,
+        on_result,
+        on_error,
+        on_progress=None,
+    ):
+        if self._shutdown_requested:
+            return
+        worker = BackgroundTask(function, *args, with_progress=on_progress is not None)
+        self._entity_index_workers.add(worker)
+        self._entity_index_worker = worker
+        worker.signals.result.connect(on_result)
+        worker.signals.error.connect(on_error)
+        if on_progress:
+            worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(lambda w=worker: self._release_entity_index_worker(w))
+        self._entity_index_pool.start(worker)
+
+    def _release_entity_index_worker(self, worker: BackgroundTask) -> None:
+        self._entity_index_workers.discard(worker)
+        if self._entity_index_worker is worker:
+            self._entity_index_worker = None
+
     def _show_progress(self, current: int, total: int, label: str):
         self.loading_bar.show()
         if total > 0:
@@ -776,6 +869,185 @@ class DiffasaurusWindow(QMainWindow):
             f"{prefix}  {source_name}  ·  {sum(map(len, self.families.values()))} CSV"
         )
 
+    def _coordinated_show_progress(self, current: int, total: int, label: str):
+        if label:
+            self._show_progress(current, total, label)
+        else:
+            self._hide_progress()
+
+    def _log_persistent_entity_index_paths(self, reports_dir: Path) -> None:
+        normalized = normalize_reports_path(reports_dir)
+        db_path = entity_index_path(normalized)
+        logger.info(
+            "Persistent entity index paths: reports_dir=%s normalized=%s source_key=%s "
+            "db_path=%s db_exists=%s",
+            reports_dir,
+            normalized,
+            source_key(normalized),
+            db_path,
+            db_path.is_file(),
+        )
+
+    def _request_persistent_entity_sync(
+        self,
+        *,
+        cold: bool = False,
+        force: bool = False,
+        reason: str = "",
+    ) -> None:
+        if self._entity_index_controller is None:
+            return
+        self.report_dir = get_active_reports_dir()
+        self._log_persistent_entity_index_paths(self.report_dir)
+        logger.info(
+            "Requesting persistent entity index sync (%s) cold=%s force=%s",
+            reason or "unspecified",
+            cold,
+            force,
+        )
+        self._entity_index_building = True
+        self.entity_history_page.show_indexing()
+        self.point_in_time_page.show_indexing()
+        self._entity_index_controller.start_sync(
+            self.report_dir,
+            force=force,
+            cold=cold,
+        )
+        self._progress_coordinator.start_task(
+            "entity_sync",
+            self._entity_index_controller.generation,
+            foreground=True,
+        )
+
+    def _ensure_persistent_entity_sync_after_scan(self) -> None:
+        if self._entity_index_controller is None:
+            return
+        self.report_dir = get_active_reports_dir()
+        self._log_persistent_entity_index_paths(self.report_dir)
+        if self._entity_index_controller.sync_state == "running":
+            logger.info(
+                "Persistent entity index sync already running (generation=%d)",
+                self._entity_index_controller.generation,
+            )
+            return
+        db_path = entity_index_path(self.report_dir)
+        repository = self._entity_index_controller.open_existing(self.report_dir)
+        if repository is not None:
+            self._apply_entity_repository(repository)
+            self._request_persistent_entity_sync(reason="incremental sync after report scan")
+            return
+        self._request_persistent_entity_sync(
+            cold=True,
+            reason="missing database after report scan",
+        )
+
+    def _entity_sync_detail(self, detail: str):
+        self.entity_history_page.show_sync_progress(detail)
+        self.point_in_time_page.show_sync_progress(detail)
+
+    def _entity_sync_progress(self, payload: dict):
+        generation = int(payload.get("generation", -1))
+        if self._entity_index_controller is None:
+            return
+        if generation != self._entity_index_controller.generation:
+            return
+        phase = payload.get("phase", "indexing")
+        if phase == "failed":
+            self._entity_sync_failed(str(payload.get("label", "Entity index synchronization failed")))
+            return
+        discovered = int(payload.get("discovered", 0))
+        total = int(payload.get("total", 0))
+        parsed = int(payload.get("parsed", 0))
+        reused = int(payload.get("reused", 0))
+        failed = int(payload.get("failed", 0))
+        unresolved = int(payload.get("unresolved", 0))
+        label = payload.get("label") or phase
+        phase_labels = {
+            "discovering": "Discovering snapshots",
+            "checking": "Checking indexed files",
+            "repairing_projections": "Repairing entity search index",
+            "indexing": "Indexing files",
+            "resolving_identities": "Resolving dependent identities",
+            "recomputing_entities": "Recomputing affected entities",
+            "checkpointing": "Checkpointing database",
+            "publishing": "Publishing entity index",
+            "finalizing": "Finalizing entity index",
+            "complete": "Entity index complete",
+            "completed_with_errors": "Entity index complete",
+        }
+        progress_label = phase_labels.get(phase, label)
+        detail = (
+            f"{discovered}/{total} discovered · parsed {parsed} · reused {reused} · "
+            f"failed {failed} · unresolved {unresolved} · {label}"
+        )
+        if phase in ("indexing", "discovering", "checking"):
+            current = parsed + reused + failed
+            total_progress = max(total, 1)
+        elif phase in (
+            "repairing_projections",
+            "resolving_identities",
+            "recomputing_entities",
+            "checkpointing",
+            "publishing",
+            "finalizing",
+        ):
+            current = 1
+            total_progress = 1
+        else:
+            current = parsed + reused + failed
+            total_progress = max(total, 1)
+        self._progress_coordinator.report_progress(
+            "entity_sync",
+            generation,
+            current,
+            total_progress,
+            progress_label,
+        )
+        self._progress_coordinator.report_entity_detail(detail)
+
+    def _entity_sync_finished(self, payload: dict):
+        generation = int(payload.get("generation", -1))
+        self._entity_index_building = False
+        self._progress_coordinator.finish_task("entity_sync", generation)
+        if self._entity_index_controller is None:
+            return
+        if generation != self._entity_index_controller.generation:
+            return
+        repository = self._entity_index_controller.open_existing(self.report_dir)
+        if repository is not None:
+            self._apply_entity_repository(repository)
+            logger.info(
+                "Persistent entity index repository refreshed after sync generation=%d",
+                generation,
+            )
+        status = payload.get("status", "complete")
+        if status in ("complete", "completed_with_errors"):
+            failed = int(payload.get("failed", 0))
+            suffix = f" ({failed} failed)" if failed else ""
+            self.entity_history_page.entity_selector.status_label.setText(
+                f"Index ready{suffix}."
+            )
+            self.point_in_time_page.entity_selector.status_label.setText(
+                f"Index ready{suffix}."
+            )
+
+    def _entity_sync_failed(self, message: str):
+        self._entity_index_building = False
+        self._hide_progress()
+        self._progress_coordinator.finish_task(
+            "entity_sync",
+            self._entity_index_controller.generation if self._entity_index_controller else -1,
+        )
+        if self._entity_index_controller and self._entity_index_controller.repository:
+            self._apply_entity_repository(self._entity_index_controller.repository)
+        self.entity_history_page.show_index_error(message)
+        self.point_in_time_page.show_index_error(message)
+        logger.error("Persistent entity index sync failed in UI: %s", message)
+
+    def _apply_entity_repository(self, repository) -> None:
+        self.entity_history_page.set_repository(repository)
+        self.point_in_time_page.set_repository(repository)
+
     def refresh_history(self):
         selected = self.family_combo.currentText()
         self.report_dir = get_active_reports_dir()
@@ -785,6 +1057,7 @@ class DiffasaurusWindow(QMainWindow):
         self._comparison_generation += 1
         self._index_generation += 1
         generation = self._index_generation
+        self._progress_coordinator.start_task("history_scan", generation, foreground=True)
         self.refresh_button.setEnabled(False)
         self.refresh_button.setText("Indexing…")
         self.family_combo.setEnabled(False)
@@ -795,10 +1068,12 @@ class DiffasaurusWindow(QMainWindow):
             (self.report_dir,),
             lambda families: self._index_ready(generation, selected, families),
             lambda message: self._index_failed(generation, message),
-            lambda current, total, label: (
-                self._show_progress(current, total, f"Indexing · {label}")
-                if generation == self._index_generation
-                else None
+            lambda current, total, label: self._progress_coordinator.report_progress(
+                "history_scan",
+                generation,
+                current,
+                total,
+                f"Indexing · {label}",
             ),
             with_progress=True,
         )
@@ -819,8 +1094,12 @@ class DiffasaurusWindow(QMainWindow):
         self._update_source_badge()
         self._refresh_run_health()
         self._refresh_recent_changes()
-        self._ensure_entity_index(force=True)
+        if self._persistent_entity_index and self._entity_index_controller is not None:
+            self._ensure_persistent_entity_sync_after_scan()
+        else:
+            self._ensure_entity_index(force=True)
         self.family_changed()
+        self._progress_coordinator.finish_task("history_scan", generation)
 
     def _index_failed(self, generation: int, message: str):
         if generation != self._index_generation:
@@ -1189,8 +1468,18 @@ class DiffasaurusWindow(QMainWindow):
         self._hide_progress()
         QMessageBox.warning(self, "Compare snapshots", message)
 
-    def _ensure_entity_index(self, force: bool = False) -> None:
+    def _ensure_entity_index(self, force: bool = False, user_requested: bool = False) -> None:
         if self._shutdown_requested or not self.families:
+            return
+        if self._persistent_entity_index:
+            if self._entity_index_controller is None:
+                return
+            repository = self._entity_index_controller.repository
+            if repository is not None:
+                self._apply_entity_repository(repository)
+            if force and self._entity_index_controller.sync_state != "running":
+                self._entity_index_building = True
+                self._entity_index_controller.start_sync(self.report_dir, force=True)
             return
         if (
             not force
@@ -1198,6 +1487,12 @@ class DiffasaurusWindow(QMainWindow):
             and self._entity_resolver_index_generation == self._index_generation
         ):
             self._apply_entity_resolver(self._entity_resolver)
+            return
+        if (
+            self._entity_index_building
+            and not user_requested
+            and self._entity_index_target_report_generation == self._index_generation
+        ):
             return
         if self._entity_index_building and not force:
             return
@@ -1209,44 +1504,107 @@ class DiffasaurusWindow(QMainWindow):
         if self._entity_index_building and not force:
             return
         if self._entity_index_building:
+            logger.info(
+                "Cancelling in-flight legacy entity index build (generation %d)",
+                self._entity_index_generation,
+            )
             self._entity_index_cancelled.set()
         self._entity_index_generation += 1
         generation = self._entity_index_generation
         self._entity_index_building = True
+        self._entity_index_target_report_generation = self._index_generation
         self._entity_index_cancelled = threading.Event()
         cancelled = self._entity_index_cancelled
+        family_count = len(self.families)
+        snapshot_count = sum(len(snapshots) for snapshots in self.families.values())
+        logger.info(
+            "Starting legacy entity index build generation=%d report_generation=%d "
+            "(%d families, %d snapshots)",
+            generation,
+            self._index_generation,
+            family_count,
+            snapshot_count,
+        )
         self.entity_history_page.show_indexing()
         self.point_in_time_page.show_indexing()
-        self._run_background(
+
+        def _legacy_index_progress_ui(current: int, total: int, label: str) -> None:
+            if generation != self._entity_index_generation:
+                return
+            detail = f"{current}/{total} snapshots · {label}"
+            self.entity_history_page.show_index_progress(detail)
+            self.point_in_time_page.show_index_progress(detail)
+
+        self._run_entity_index_background(
             _build_entity_index_task,
             (self.families, cancelled),
             lambda result: self._entity_index_ready(generation, result),
             lambda message: self._entity_index_failed(generation, message),
+            on_progress=_legacy_index_progress_ui,
         )
+
+    def _clear_entity_index_ui(self) -> None:
+        if self._entity_resolver is not None:
+            self._apply_entity_resolver(self._entity_resolver)
+            return
+        self.entity_history_page.clear_index_state()
+        self.point_in_time_page.clear_index_state()
 
     def _apply_entity_resolver(self, resolver) -> None:
         self.entity_history_page.set_resolver(resolver)
         self.point_in_time_page.set_resolver(resolver)
 
     def _entity_index_ready(self, generation: int, result):
-        if generation != self._entity_index_generation or self._shutdown_requested:
+        current_generation = self._entity_index_generation
+        if generation != current_generation:
+            logger.info(
+                "Ignoring stale legacy entity index result "
+                "(worker generation=%d current=%d building=%s)",
+                generation,
+                current_generation,
+                self._entity_index_building,
+            )
+            return
+        if self._shutdown_requested:
+            logger.info("Ignoring legacy entity index result during shutdown")
+            self._entity_index_building = False
             return
         self._entity_index_building = False
         if result is None:
+            logger.warning(
+                "Legacy entity index build generation=%d returned no result",
+                generation,
+            )
+            self._clear_entity_index_ui()
             return
-        resolver, _stats = result
+        resolver, stats = result
         self._entity_resolver = resolver
         self._entity_resolver_index_generation = self._index_generation
         self._apply_entity_resolver(resolver)
+        logger.info(
+            "Legacy entity index generation=%d installed on entity pages "
+            "(%d entities, report generation=%d)",
+            generation,
+            stats.entity_count if stats is not None else len(resolver.records),
+            self._index_generation,
+        )
         if self.entity_history_page._selected:
             self._refresh_entity_period_changes()
 
     def _entity_index_failed(self, generation: int, message: str):
         if generation != self._entity_index_generation:
+            logger.info(
+                "Ignoring stale legacy entity index failure "
+                "(worker generation=%d current=%d): %s",
+                generation,
+                self._entity_index_generation,
+                message,
+            )
             return
         self._entity_index_building = False
         if self._shutdown_requested:
             return
+        logger.error("Legacy entity index build generation=%d failed: %s", generation, message)
         self.entity_history_page.show_index_error(message)
         self.point_in_time_page.show_index_error(message)
         QMessageBox.warning(self, "Entity index", message)
@@ -1262,6 +1620,19 @@ class DiffasaurusWindow(QMainWindow):
         self._pit_generation += 1
         generation = self._pit_generation
         self.point_in_time_page.show_loading()
+        if (
+            self._persistent_entity_index
+            and self._entity_index_controller is not None
+            and self._entity_index_controller.repository is not None
+        ):
+            repository = self._entity_index_controller.repository
+            self._run_background(
+                repository.reconstruct_state,
+                (record.key, target),
+                lambda state: self._point_in_time_ready(generation, record, state),
+                lambda message: self._point_in_time_failed(generation, message),
+            )
+            return
         self._run_background(
             reconstruct_entity_state,
             (record.key, self.families, target),
@@ -1287,6 +1658,19 @@ class DiffasaurusWindow(QMainWindow):
         self._entity_changes_generation += 1
         generation = self._entity_changes_generation
         self.entity_history_page._load_period_changes(record)
+        if (
+            self._persistent_entity_index
+            and self._entity_index_controller is not None
+            and self._entity_index_controller.repository is not None
+        ):
+            repository = self._entity_index_controller.repository
+            self._run_background(
+                repository.period_changes,
+                (record.key, period),
+                lambda changes: self._entity_period_changes_ready(generation, changes),
+                lambda message: self._entity_period_changes_failed(generation, message),
+            )
+            return
         self._run_background(
             EntityHistoryPage.compute_period_changes,
             (record, self.families, period),
@@ -1490,6 +1874,12 @@ class DiffasaurusWindow(QMainWindow):
         self._pit_generation += 1
         self._comparison_generation += 1
         self._family_generation += 1
+        if self._entity_index_controller is not None:
+            self._entity_index_controller.shutdown(ENTITY_INDEX_SHUTDOWN_WAIT_MS)
+            self._entity_index_controller.close_repository()
+        self._entity_index_cancelled.set()
+        self._entity_index_pool.clear()
+        self._entity_index_pool.waitForDone(ENTITY_INDEX_SHUTDOWN_WAIT_MS)
         self.thread_pool.clear()
         self.thread_pool.waitForDone(ENTITY_INDEX_SHUTDOWN_WAIT_MS)
         event.accept()
@@ -1502,6 +1892,12 @@ class DiffasaurusWindow(QMainWindow):
     def open_source_settings(self):
         dialog = ReportSourceSettingsDialog(self)
         if dialog.exec():
+            if self._persistent_entity_index and self._entity_index_controller is not None:
+                self._entity_index_controller.close_repository()
+                self.report_dir = get_active_reports_dir()
+                repository = self._entity_index_controller.open_existing(self.report_dir)
+                if repository is not None:
+                    self._apply_entity_repository(repository)
             self.refresh_history()
 
 
@@ -1664,7 +2060,16 @@ def application_icon_path() -> Path:
 
 
 def main():
+    import logging
     import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("diffasaurus.ui.main_window").setLevel(logging.INFO)
+    logging.getLogger("diffasaurus.ui.entity_index_controller").setLevel(logging.INFO)
+    logging.getLogger("diffasaurus.core.entity.index_sync").setLevel(logging.INFO)
 
     app = QApplication(sys.argv)
     app.setApplicationName("Diffasaurus")

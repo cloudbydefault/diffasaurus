@@ -62,12 +62,15 @@ class EntityResolver:
         families: dict[str, list[ReportSnapshot]],
         cancelled: threading.Event | None = None,
         stats: EntityIndexStats | None = None,
+        progress=None,
     ) -> None:
         started = time.perf_counter()
         binding_started = time.perf_counter()
         self._records.clear()
         alias_index = AliasBindingIndex()
         latest_keys: dict[str, set[str]] = {}
+        total_snapshots = sum(len(snapshots) for snapshots in families.values())
+        progress_interval = max(1, total_snapshots // 100) if total_snapshots else 1
 
         def _check_cancelled() -> None:
             if cancelled is not None and cancelled.is_set():
@@ -76,6 +79,16 @@ class EntityResolver:
         def _load_rows(snapshot: ReportSnapshot) -> tuple[tuple[str, ...], list[dict[str, str]]]:
             if stats is not None:
                 stats.snapshots_scanned += 1
+                if progress is not None and (
+                    stats.snapshots_scanned == 1
+                    or stats.snapshots_scanned == total_snapshots
+                    or stats.snapshots_scanned % progress_interval == 0
+                ):
+                    progress(
+                        stats.snapshots_scanned,
+                        total_snapshots,
+                        snapshot.path.name,
+                    )
             return load_snapshot_rows(snapshot, stats)
 
         def _process_snapshot(
@@ -249,9 +262,10 @@ def build_entity_resolver(
     families: dict[str, list[ReportSnapshot]],
     cancelled: threading.Event | None = None,
     stats: EntityIndexStats | None = None,
+    progress=None,
 ) -> EntityResolver:
     resolver = EntityResolver()
-    resolver.build_index(families, cancelled=cancelled, stats=stats)
+    resolver.build_index(families, cancelled=cancelled, stats=stats, progress=progress)
     if stats is not None:
         logger.info(
             "Entity index: %d snapshots, %d parsed, %d cache hits, "

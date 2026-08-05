@@ -85,6 +85,19 @@ class ReportFamilyAdapter:
                 properties.append((column, value))
         return properties
 
+    def headers_supported(self, headers: tuple[str, ...] | list[str]) -> bool:
+        headers_lower = {header.lower() for header in headers}
+        if self.canonical_columns:
+            return any(column.lower() in headers_lower for column in self.canonical_columns)
+        if self.alias_columns:
+            return any(alias.column.lower() in headers_lower for alias in self.alias_columns)
+        return self.fallback_key is not None
+
+    def is_upn_dependent(self) -> bool:
+        if self.canonical_columns:
+            return False
+        return any(alias.kind == "upn" for alias in self.alias_columns)
+
 
 def _autopilot_fallback(row: dict[str, str], family: str) -> str | None:
     value = _row_value(row, "AutopilotObjectId")
