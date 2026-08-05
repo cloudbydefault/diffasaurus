@@ -12,10 +12,20 @@ from PyQt6.QtWidgets import QApplication
 from diffasaurus.core.entity.index_paths import entity_index_path
 from diffasaurus.core.entity.index_repository import EntityIndexRepository
 from diffasaurus.core.entity.index_sync import run_sync
+from diffasaurus.core.entity.pit_presentation import (
+    CardCollection,
+    CardCollectionItem,
+    CardSection,
+    PointInTimeCardModel,
+    PointInTimeSourceDetails,
+    single_provenance,
+    ProvenanceObservation,
+)
 from diffasaurus.core.entity.types import CanonicalEntityKey, EntityRecord, TimedAlias
 from diffasaurus.ui.entity_history import EntityHistoryPage
 from diffasaurus.ui.entity_search import EntitySelectorPanel
 from diffasaurus.ui.point_in_time import PointInTimePage, PRESENCE_PARTIAL_COPY
+from diffasaurus.ui.point_in_time_card import EntityIdentityCardView
 from tests.fixtures.entity_index_generator import write_report
 
 
@@ -24,10 +34,14 @@ class PointInTimeUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_point_in_time_page_has_splitter(self):
+    def test_point_in_time_page_has_vertical_card_layout(self):
         page = PointInTimePage()
-        self.assertIsNotNone(page.splitter)
-        self.assertGreaterEqual(page.splitter.handleWidth(), 1)
+        self.assertIsNotNone(page.card_scroll)
+        self.assertEqual(
+            page.card_scroll.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertFalse(page.source_details_panel.isVisible())
 
     def test_timezone_disclaimer_visible(self):
         page = PointInTimePage()
@@ -177,6 +191,95 @@ class PointInTimeUiTests(unittest.TestCase):
                 period_future.result()
                 reconstruct_future.result()
             repo.close()
+
+    def _build_fifty_group_model(self) -> PointInTimeCardModel:
+        requested = datetime(2026, 8, 1, 12, 0, 0)
+        observation = ProvenanceObservation(
+            family="Entra_Group_User_Memberships",
+            observed_at=requested,
+            snapshot_at=requested,
+            requested_at=requested,
+            gap=timedelta(hours=1),
+        )
+        items = tuple(
+            CardCollectionItem(
+                primary_label=f"Group {index:02d}",
+                secondary_label="Member",
+                detail=f"g-{index}",
+                provenance=single_provenance(observation),
+                sort_key=f"group {index:02d}",
+            )
+            for index in range(50)
+        )
+        collection = CardCollection(
+            collection_id="groups",
+            title="Groups",
+            coverage="populated",
+            items=items,
+            source_family="Entra_Group_User_Memberships",
+        )
+        section = CardSection(
+            section_id="groups",
+            title="Groups",
+            fields=(),
+            collections=(collection,),
+        )
+        return PointInTimeCardModel(
+            entity_type="user",
+            display_name="Ada",
+            canonical_id="user-1",
+            requested_at=requested,
+            presence="present",
+            history_range=(None, None),
+            coverage_summary="1 contributing · 0 without usable coverage",
+            sections=(section,),
+            source_details=PointInTimeSourceDetails(
+                coverage=(),
+                scalar_properties_by_family={},
+                relationships_by_family={},
+                family_coverage_labels={},
+            ),
+        )
+
+    def test_large_group_collection_layout(self):
+        model = self._build_fifty_group_model()
+        view = EntityIdentityCardView()
+        view.set_model(model)
+        view.resize(1280, 720)
+        view.show()
+        QApplication.processEvents()
+
+        collection = view.collection_widget("groups")
+        self.assertIsNotNone(collection)
+        self.assertEqual(collection.header_label.text(), "Groups · 50")
+
+        scroll = view.parent()
+        while scroll is not None and not hasattr(scroll, "horizontalScrollBar"):
+            scroll = scroll.parent()
+        if scroll is not None:
+            self.assertFalse(scroll.horizontalScrollBar().isVisible())
+
+        collection._toggle_expanded()
+        QApplication.processEvents()
+        self.assertEqual(collection.header_label.text(), "Groups · 50")
+        self.assertTrue(collection.filter_input.isVisible())
+
+        collection.filter_input.setText("Group 49")
+        QApplication.processEvents()
+        visible_after_filter = collection.rows_host.count()
+        self.assertLess(visible_after_filter, 50)
+        self.assertGreaterEqual(visible_after_filter, 1)
+
+        collection.filter_input.clear()
+        QApplication.processEvents()
+        self.assertTrue(collection.show_all_button.isVisible())
+        collection.show_all_button.click()
+        QApplication.processEvents()
+        self.assertEqual(collection.rows_host.count(), 50)
+
+        collection.show_all_button.click()
+        QApplication.processEvents()
+        self.assertLessEqual(collection.rows_host.count(), 8)
 
 
 if __name__ == "__main__":
