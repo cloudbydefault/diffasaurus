@@ -15,6 +15,17 @@ class EntityIndexStats:
     binding_seconds: float = 0.0
     total_seconds: float = 0.0
     entity_count: int = 0
+    files_indexed: int = 0
+    files_reused: int = 0
+
+
+@dataclass(frozen=True)
+class SearchCapabilities:
+    exact_id: bool = True
+    exact_alias: bool = True
+    prefix_autocomplete: bool = True
+    substring_search: bool = False
+    fts5_enabled: bool = False
 
 
 @dataclass(frozen=True)

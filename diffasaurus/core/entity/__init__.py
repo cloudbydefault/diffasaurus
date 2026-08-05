@@ -6,7 +6,9 @@ from diffasaurus.core.entity.history import (
     present_at_target,
     reconstruct_entity_state,
 )
-from diffasaurus.core.entity.resolution import EntityResolver, SearchResult
+from diffasaurus.core.entity.feature import persistent_entity_index_enabled
+from diffasaurus.core.entity.index_repository import EntityIndexRepository
+from diffasaurus.core.entity.index_sync import run_sync
 from diffasaurus.core.entity.types import (
     CanonicalEntityKey,
     EntityChangeEvent,
@@ -28,6 +30,7 @@ __all__ = [
     "EntityPeriodChanges",
     "EntityPresenceStatus",
     "EntityRecord",
+    "EntityIndexRepository",
     "EntityResolver",
     "EntityState",
     "EntityStateDiff",
@@ -42,5 +45,7 @@ __all__ = [
     "compare_entity_states",
     "entity_rows_at",
     "present_at_target",
+    "persistent_entity_index_enabled",
     "reconstruct_entity_state",
+    "run_sync",
 ]

@@ -378,6 +378,7 @@ class EntityHistoryPage(QWidget):
         self.period_selector.period_changed.connect(self._emit_period_changed)
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         self.entity_selector.entity_selected.connect(self._select_entity)
+        self.entity_selector.selection_cleared.connect(self._clear_entity_selection)
         self.view_at_date_button.clicked.connect(self._emit_view_at_date)
 
         self.type_combo = self.entity_selector.type_combo
@@ -405,6 +406,20 @@ class EntityHistoryPage(QWidget):
         if self._selected:
             self._load_period_changes(self._selected)
 
+    def show_sync_progress(self, detail: str) -> None:
+        self.entity_selector.show_sync_progress(detail)
+
+    def set_repository(self, repository) -> None:
+        from diffasaurus.core.entity.index_repository import EntityIndexRepository
+
+        assert isinstance(repository, EntityIndexRepository)
+        self._resolver = None
+        self._selected = None
+        self.entity_selector.set_repository(repository)
+        self._clear_card()
+        self._clear_changes()
+        self.view_at_date_button.setEnabled(False)
+
     def set_resolver(self, resolver: EntityResolver) -> None:
         self._resolver = resolver
         self._selected = None
@@ -419,8 +434,23 @@ class EntityHistoryPage(QWidget):
         self._clear_changes()
         self.view_at_date_button.setEnabled(False)
 
+    def show_index_progress(self, detail: str) -> None:
+        self.entity_selector.show_index_progress(detail)
+
+    def clear_index_state(self) -> None:
+        self.entity_selector.clear_index_state()
+        self._clear_card()
+        self._clear_changes()
+        self.view_at_date_button.setEnabled(False)
+
     def show_index_error(self, message: str) -> None:
         self.entity_selector.show_index_error(message)
+        self._clear_card()
+        self._clear_changes()
+        self.view_at_date_button.setEnabled(False)
+
+    def _clear_entity_selection(self) -> None:
+        self._selected = None
         self._clear_card()
         self._clear_changes()
         self.view_at_date_button.setEnabled(False)

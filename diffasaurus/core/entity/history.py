@@ -78,20 +78,32 @@ def row_entity_key(
     observed_at: datetime,
     alias_index: AliasBindingIndex,
 ) -> CanonicalEntityKey | None:
+    key, _reason = classify_row_entity_key(adapter, row, observed_at, alias_index)
+    return key
+
+
+def classify_row_entity_key(
+    adapter: ReportFamilyAdapter,
+    row: dict[str, str],
+    observed_at: datetime,
+    alias_index: AliasBindingIndex,
+) -> tuple[CanonicalEntityKey | None, str | None]:
     key = adapter.build_key(row)
     if key is None:
-        return None
+        return None, None
 
     if key.entity_type == "user" and key.primary_id.startswith("upn_only:"):
         upn = _extract_upn(adapter, row)
-        if upn:
-            resolved = alias_index.resolve("upn", upn.lower(), observed_at)
-            if resolved.status == "bound":
-                return CanonicalEntityKey("user", resolved.immutable_id)
-            if resolved.status == "ambiguous":
-                return None
+        if not upn:
+            return None, "missing_upn"
+        resolved = alias_index.resolve("upn", upn.lower(), observed_at)
+        if resolved.status == "bound":
+            return CanonicalEntityKey("user", resolved.immutable_id), None
+        if resolved.status == "ambiguous":
+            return None, "ambiguous_upn"
+        return None, "unbound_upn"
 
-    return key
+    return key, None
 
 
 def row_matches_entity(

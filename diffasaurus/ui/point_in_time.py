@@ -101,6 +101,7 @@ class PointInTimePage(QWidget):
         action_spacer.setObjectName("fieldLabel")
         self.reconstruct_button = QPushButton("Reconstruct")
         self.reconstruct_button.setObjectName("primaryButton")
+        self.reconstruct_button.setEnabled(False)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setObjectName("secondaryButton")
         action_box.addWidget(action_spacer)
@@ -196,6 +197,7 @@ class PointInTimePage(QWidget):
         layout.addWidget(self.splitter, 1)
 
         self.entity_selector.entity_selected.connect(self._on_entity_selected)
+        self.entity_selector.selection_cleared.connect(self._on_selection_cleared)
         self.reconstruct_button.clicked.connect(self._request_reconstruct)
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
 
@@ -207,6 +209,17 @@ class PointInTimePage(QWidget):
         )
         return label
 
+    def show_sync_progress(self, detail: str) -> None:
+        self.entity_selector.show_sync_progress(detail)
+
+    def set_repository(self, repository) -> None:
+        from diffasaurus.core.entity.index_repository import EntityIndexRepository
+
+        assert isinstance(repository, EntityIndexRepository)
+        self._resolver = None
+        self.entity_selector.set_repository(repository)
+        self._clear_state()
+
     def set_resolver(self, resolver: EntityResolver) -> None:
         self._resolver = resolver
         self.entity_selector.set_resolver(resolver)
@@ -214,6 +227,13 @@ class PointInTimePage(QWidget):
 
     def show_indexing(self) -> None:
         self.entity_selector.show_indexing()
+        self._clear_state()
+
+    def show_index_progress(self, detail: str) -> None:
+        self.entity_selector.show_index_progress(detail)
+
+    def clear_index_state(self) -> None:
+        self.entity_selector.clear_index_state()
         self._clear_state()
 
     def show_index_error(self, message: str) -> None:
@@ -275,6 +295,11 @@ class PointInTimePage(QWidget):
 
     def _on_entity_selected(self, record: EntityRecord) -> None:
         self._selected = record
+        self.reconstruct_button.setEnabled(True)
+
+    def _on_selection_cleared(self) -> None:
+        self._selected = None
+        self.reconstruct_button.setEnabled(False)
 
     def _request_reconstruct(self) -> None:
         if not self._selected:
@@ -340,6 +365,7 @@ class PointInTimePage(QWidget):
     def _clear_state(self) -> None:
         self._state = None
         self._selected = None
+        self.reconstruct_button.setEnabled(False)
         self.summary_title.setText("Select an entity and target time")
         self.summary_subtitle.setText("")
         self.summary_target.setText("—")
