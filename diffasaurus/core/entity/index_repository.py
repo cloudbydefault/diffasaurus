@@ -1241,6 +1241,75 @@ class EntityIndexRepository:
                 user_alias_values=alias_values,
             )
             return enrichment
+
+    def _load_autopilot_snapshot_index(
+        self,
+        connection: sqlite3.Connection,
+        target: datetime,
+    ) -> tuple[datetime | None, str, object | None]:
+        from diffasaurus.core.entity.autopilot_matching import (
+            build_autopilot_snapshot_index,
+        )
+        from diffasaurus.core.entity.pit_enrichment import AUTOPILOT_FAMILY
+
+        file_row = self._latest_indexed_file_row(connection, AUTOPILOT_FAMILY, target)
+        if file_row is None:
+            return None, "", None
+
+        snapshot_at = datetime.fromisoformat(file_row["captured_at"])
+        file_id = int(file_row["id"])
+        source_relative_path = str(file_row["relative_path"] or "")
+        property_rows: list[tuple[SourcedProperty, ...]] = []
+        for occurrence in connection.execute(
+            """
+            SELECT scalar_properties_json, observed_at
+            FROM entity_occurrences
+            WHERE file_id=?
+            ORDER BY id
+            """,
+            (file_id,),
+        ):
+            props = tuple(
+                SourcedProperty(
+                    family=item["family"],
+                    name=item["name"],
+                    value=item["value"],
+                    observed_at=datetime.fromisoformat(item["observed_at"]),
+                )
+                for item in json.loads(occurrence["scalar_properties_json"] or "[]")
+            )
+            property_rows.append(props)
+
+        index = build_autopilot_snapshot_index(property_rows)
+        return snapshot_at, source_relative_path, index
+
+    def enrich_managed_devices_with_autopilot_at(
+        self,
+        managed_devices,
+        target: datetime,
+    ):
+        from diffasaurus.core.entity.autopilot_matching import enrich_managed_devices_with_autopilot
+
+        with _connect(self._db_path, readonly=self._readonly) as connection:
+            snapshot_at, source_path, index = self._load_autopilot_snapshot_index(
+                connection, target
+            )
+        return enrich_managed_devices_with_autopilot(
+            managed_devices,
+            index,
+            target=target,
+            autopilot_snapshot_at=snapshot_at,
+            autopilot_source_relative_path=source_path or "",
+        )
+
+    def user_managed_devices_with_autopilot_at(
+        self,
+        user_key: CanonicalEntityKey,
+        target: datetime,
+    ):
+        base = self.user_managed_devices_at(user_key, target)
+        return self.enrich_managed_devices_with_autopilot_at(base, target)
+
     def enrich_user_point_in_time(
         self,
         user_key: CanonicalEntityKey,
@@ -1249,5 +1318,5 @@ class EntityIndexRepository:
         from diffasaurus.core.entity.pit_enrichment import UserPointInTimeEnrichment
 
         return UserPointInTimeEnrichment(
-            managed_devices=self.user_managed_devices_at(user_key, target),
+            managed_devices=self.user_managed_devices_with_autopilot_at(user_key, target),
         )
