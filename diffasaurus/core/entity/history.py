@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from diffasaurus.core.entity.adapters import ReportFamilyAdapter
 from diffasaurus.core.entity.bindings import AliasBindingIndex
+from diffasaurus.core.entity.family_aliases import snapshots_for_adapter
 from diffasaurus.core.entity.registry import ADAPTERS_BY_FAMILY, adapters_for_type
 from diffasaurus.core.entity.snapshots import load_snapshot_rows, snapshot_at_or_before
 from diffasaurus.core.entity.types import (
@@ -21,6 +22,7 @@ from diffasaurus.core.entity.types import (
 from diffasaurus.core.report_history import (
     ReportSnapshot,
     period_window,
+    report_family,
     resolve_period_pair,
 )
 
@@ -372,7 +374,7 @@ def build_entity_period_changes(
     notes: list[tuple[str, str]] = []
 
     for adapter in adapters_for_type(entity_key.entity_type):
-        snapshots = families.get(adapter.family, [])
+        snapshots = snapshots_for_adapter(families, adapter.family)
         if not snapshots:
             continue
         pairing = resolve_period_pair(snapshots, period, reference_at)
@@ -419,7 +421,7 @@ def reconstruct_entity_state(
     properties_by_family: dict[str, tuple[SourcedProperty, ...]] = {}
 
     for adapter in adapters_for_type(entity_key.entity_type):
-        snapshots = families.get(adapter.family, [])
+        snapshots = snapshots_for_adapter(families, adapter.family)
         snapshot, rows, status = entity_rows_at(
             entity_key,
             adapter,
@@ -430,6 +432,11 @@ def reconstruct_entity_state(
         gap = None
         if snapshot is not None:
             gap = target - snapshot.captured_at
+        source_relative_path = ""
+        source_report_family = ""
+        if snapshot is not None:
+            source_relative_path = snapshot.path.name
+            source_report_family = report_family(snapshot.path)
         coverage_items.append(
             FamilyCoverage(
                 family=adapter.family,
@@ -438,6 +445,8 @@ def reconstruct_entity_state(
                 snapshot_at=snapshot.captured_at if snapshot is not None else None,
                 gap=gap,
                 entity_present=status == "snapshot_used",
+                source_relative_path=source_relative_path,
+                source_report_family=source_report_family,
             )
         )
         family_coverage[adapter.family] = _family_coverage_label(status, snapshot)

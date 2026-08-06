@@ -41,6 +41,10 @@ from diffasaurus.core.entity.index_schema import (
     transaction,
     utc_now_iso,
 )
+from diffasaurus.core.entity.family_aliases import (
+    ENTITY_FAMILY_ALIASES,
+    canonical_entity_family,
+)
 from diffasaurus.core.entity.registry import ADAPTERS_BY_FAMILY
 from diffasaurus.core.entity.types import CanonicalEntityKey
 from diffasaurus.core.report_history import read_csv_rows, report_family, report_timestamp
@@ -63,6 +67,7 @@ def compute_adapter_version() -> str:
                 "authoritative_inventory": adapter.authoritative_inventory,
             }
         )
+    payload.append({"entity_family_aliases": ENTITY_FAMILY_ALIASES})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
 
@@ -255,6 +260,7 @@ class _DiscoveredFile:
     path: Path
     relative_path: str
     family: str
+    raw_family: str
     captured_at: datetime
     size_bytes: int
     mtime_ns: int
@@ -267,16 +273,30 @@ def _classify_file(reports_dir: Path, path: Path) -> _DiscoveredFile | None:
         captured_at = report_timestamp(path)
     except (OSError, ValueError):
         return None
-    family = report_family(path)
+    raw_family = report_family(path)
+    canonical_family = canonical_entity_family(raw_family)
     return _DiscoveredFile(
         path=path,
         relative_path=relative_report_path(reports_dir, path),
-        family=family,
+        family=canonical_family,
+        raw_family=raw_family,
         captured_at=captured_at,
         size_bytes=stat.st_size,
         mtime_ns=stat.st_mtime_ns,
-        supported=family in ADAPTERS_BY_FAMILY,
+        supported=canonical_family in ADAPTERS_BY_FAMILY,
     )
+
+
+def _repair_alias_indexed_families(connection: sqlite3.Connection, source_id: int) -> None:
+    for alias, canonical in ENTITY_FAMILY_ALIASES.items():
+        connection.execute(
+            """
+            UPDATE indexed_files
+            SET family=?, status='pending'
+            WHERE source_id=? AND family=? AND status='indexed'
+            """,
+            (canonical, source_id, alias),
+        )
 
 
 def _get_or_create_file_row(
@@ -481,6 +501,13 @@ def _index_supported_file(
                 utc_now_iso(),
                 file_id,
             ),
+        )
+        connection.execute(
+            """
+            DELETE FROM unsupported_files
+            WHERE source_id=? AND relative_path=?
+            """,
+            (source_id, item.relative_path),
         )
     affected_entity_ids.update(entity_ids)
 
@@ -741,6 +768,7 @@ def run_sync(
 
             try:
                 source_id = _ensure_source(connection, reports_dir)
+                _repair_alias_indexed_families(connection, source_id)
 
                 if projections_need_repair(connection):
                     emit("repairing_projections", "Repairing entity search index…")

@@ -13,12 +13,128 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from diffasaurus.core.entity.pit_auth_methods import AUTH_METHODS_FAMILY
 from diffasaurus.core.entity.pit_presentation import PointInTimeSourceDetails
 from diffasaurus.core.entity.registry import adapters_for_type
 from diffasaurus.core.entity.types import EntityType, ScopedRelationship
 from diffasaurus.ui.entity_history import FamilyPropertySection, _table_item
 from diffasaurus.ui.point_in_time_styles import PIT_COLORS, format_gap
 from diffasaurus.ui.report_runner import family_display_name
+
+
+class AuthMethodsDetailsSection(QFrame):
+    def __init__(self, details: PointInTimeSourceDetails, parent=None):
+        super().__init__(parent)
+        self.setObjectName("authMethodsDetailsSection")
+        parsed = details.auth_methods
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        heading = QLabel("Authentication methods · parsed")
+        heading.setStyleSheet(
+            f"color: {PIT_COLORS['teal']}; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
+        )
+        layout.addWidget(heading)
+
+        if parsed is None:
+            empty = QLabel("No authentication methods enrichment available.")
+            empty.setStyleSheet(f"color: {PIT_COLORS['muted']}; font-size: 11px;")
+            layout.addWidget(empty)
+            return
+
+        summary_rows = [
+            ("Coverage", parsed.coverage.replace("_", " ")),
+            ("Merged methods", ", ".join(parsed.methods) if parsed.methods else "—"),
+            ("Has conflict", "Yes" if parsed.has_conflict else "No"),
+        ]
+        source_info = details.family_source_info.get(AUTH_METHODS_FAMILY)
+        if source_info is not None:
+            relative_path, raw_family = source_info
+            if relative_path:
+                summary_rows.append(("Source file", relative_path))
+            if raw_family:
+                summary_rows.append(("Detected report family", raw_family))
+        summary = QTableWidget(len(summary_rows), 2)
+        summary.setHorizontalHeaderLabels(("Field", "Value"))
+        summary.setAlternatingRowColors(True)
+        summary.verticalHeader().setVisible(False)
+        summary.setShowGrid(False)
+        summary.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        summary.horizontalHeader().setStretchLastSection(True)
+        for row, (label, value) in enumerate(summary_rows):
+            summary.setItem(row, 0, _table_item(label))
+            summary.setItem(row, 1, _table_item(value))
+        summary.setMinimumHeight(min(max(summary.rowHeight(0) * len(summary_rows) + 40, 60), 120))
+        layout.addWidget(summary)
+
+        for source in parsed.sources:
+            source_heading = QLabel(f"Source · {source.property_name}")
+            source_heading.setStyleSheet(
+                f"color: {PIT_COLORS['muted']}; font-size: 10px; font-weight: 700;"
+            )
+            layout.addWidget(source_heading)
+            source_rows = [
+                ("Raw value", source.raw_value if source.raw_value else "—"),
+                ("Parsed methods", ", ".join(source.parsed_methods) if source.parsed_methods else "—"),
+            ]
+            if source.provenance.observations:
+                obs = source.provenance.observations[0]
+                observed = (
+                    obs.observed_at.strftime("%d %b %Y · %H:%M") if obs.observed_at else "—"
+                )
+                source_rows.append(("Observed", observed))
+                source_rows.append(("Family", obs.family))
+            table = QTableWidget(len(source_rows), 2)
+            table.setHorizontalHeaderLabels(("Property", "Value"))
+            table.setAlternatingRowColors(True)
+            table.verticalHeader().setVisible(False)
+            table.setShowGrid(False)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.horizontalHeader().setStretchLastSection(True)
+            for row, (label, value) in enumerate(source_rows):
+                table.setItem(row, 0, _table_item(label))
+                table.setItem(row, 1, _table_item(value))
+            table.setMinimumHeight(min(max(table.rowHeight(0) * len(source_rows) + 40, 60), 160))
+            layout.addWidget(table)
+
+        if parsed.conflict is not None:
+            conflict_heading = QLabel("Source disagreement")
+            conflict_heading.setStyleSheet(
+                f"color: {PIT_COLORS['amber']}; font-size: 10px; font-weight: 700;"
+            )
+            layout.addWidget(conflict_heading)
+            conflict_rows = [
+                (
+                    "Authoritative property",
+                    parsed.conflict.authoritative_property,
+                ),
+                (
+                    "Authoritative methods",
+                    ", ".join(parsed.conflict.authoritative_methods),
+                ),
+            ]
+            for alternate in parsed.conflict.alternates:
+                conflict_rows.append(
+                    (
+                        f"Alternate · {alternate.property_name}",
+                        ", ".join(alternate.parsed_methods),
+                    )
+                )
+            conflict_table = QTableWidget(len(conflict_rows), 2)
+            conflict_table.setHorizontalHeaderLabels(("Property", "Value"))
+            conflict_table.setAlternatingRowColors(True)
+            conflict_table.verticalHeader().setVisible(False)
+            conflict_table.setShowGrid(False)
+            conflict_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            conflict_table.horizontalHeader().setStretchLastSection(True)
+            for row, (label, value) in enumerate(conflict_rows):
+                conflict_table.setItem(row, 0, _table_item(label))
+                conflict_table.setItem(row, 1, _table_item(value))
+            conflict_table.setMinimumHeight(
+                min(max(conflict_table.rowHeight(0) * len(conflict_rows) + 40, 60), 200)
+            )
+            layout.addWidget(conflict_table)
 
 
 class RelationshipSection(QFrame):
@@ -130,6 +246,8 @@ class PointInTimeSourceDetailsPanel(QWidget):
         self._clear_sections()
         if details is None:
             return
+        if details.auth_methods is not None:
+            self.sections_host.addWidget(AuthMethodsDetailsSection(details))
         for adapter in adapters_for_type(entity_type):
             family = adapter.family
             scalar = list(details.scalar_properties_by_family.get(family, ()))
