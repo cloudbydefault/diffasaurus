@@ -25,6 +25,8 @@ from diffasaurus.core.entity.index_lock import EntityIndexLockError, acquire_ent
 from diffasaurus.core.entity.index_projection import (
     projections_need_repair,
     repair_search_projections,
+    user_device_links_need_build,
+    build_user_device_link_projection,
 )
 from diffasaurus.core.entity.index_paths import (
     cleanup_index_files,
@@ -45,6 +47,7 @@ from diffasaurus.core.entity.family_aliases import (
     ENTITY_FAMILY_ALIASES,
     canonical_entity_family,
 )
+from diffasaurus.core.entity.pit_enrichment import MANAGED_DEVICES_FAMILY
 from diffasaurus.core.entity.registry import ADAPTERS_BY_FAMILY
 from diffasaurus.core.entity.types import CanonicalEntityKey
 from diffasaurus.core.report_history import read_csv_rows, report_family, report_timestamp
@@ -52,21 +55,39 @@ from diffasaurus.core.report_history import read_csv_rows, report_family, report
 logger = logging.getLogger(__name__)
 
 
+def _adapter_fingerprint_payload(adapter: ReportFamilyAdapter) -> dict:
+    return {
+        "family": adapter.family,
+        "entity_type": adapter.entity_type,
+        "canonical_columns": adapter.canonical_columns,
+        "alias_columns": [(item.kind, item.column) for item in adapter.alias_columns],
+        "display_name_column": adapter.display_name_column,
+        "row_scope_columns": adapter.row_scope_columns,
+        "card_columns": adapter.card_columns,
+        "authoritative_inventory": adapter.authoritative_inventory,
+    }
+
+
+def compute_family_adapter_version(family: str) -> str:
+    """Per-family adapter fingerprint used for selective re-index."""
+    adapter = ADAPTERS_BY_FAMILY.get(family)
+    payload: dict = {"entity_family_aliases": ENTITY_FAMILY_ALIASES}
+    if adapter is not None:
+        payload["adapter"] = _adapter_fingerprint_payload(adapter)
+    else:
+        payload["adapter"] = {"family": family}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def compute_family_adapter_versions() -> dict[str, str]:
+    return {adapter.family: compute_family_adapter_version(adapter.family) for adapter in ALL_ADAPTERS}
+
+
 def compute_adapter_version() -> str:
     payload: list[dict] = []
     for adapter in ALL_ADAPTERS:
-        payload.append(
-            {
-                "family": adapter.family,
-                "entity_type": adapter.entity_type,
-                "canonical_columns": adapter.canonical_columns,
-                "alias_columns": [(item.kind, item.column) for item in adapter.alias_columns],
-                "display_name_column": adapter.display_name_column,
-                "row_scope_columns": adapter.row_scope_columns,
-                "card_columns": adapter.card_columns,
-                "authoritative_inventory": adapter.authoritative_inventory,
-            }
-        )
+        payload.append(_adapter_fingerprint_payload(adapter))
     payload.append({"entity_family_aliases": ENTITY_FAMILY_ALIASES})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
@@ -340,6 +361,7 @@ def _needs_reindex(
     item: _DiscoveredFile,
     adapter_version: str,
 ) -> bool:
+    del adapter_version  # per-file comparisons use the family fingerprint
     row = connection.execute(
         """
         SELECT status, active_size_bytes, active_mtime_ns, adapter_version
@@ -351,13 +373,106 @@ def _needs_reindex(
         return True
     if row["status"] != "indexed":
         return True
-    if row["adapter_version"] != adapter_version:
+    expected = compute_family_adapter_version(item.family)
+    if row["adapter_version"] != expected:
         return True
     if row["active_size_bytes"] != item.size_bytes:
         return True
     if row["active_mtime_ns"] != item.mtime_ns:
         return True
     return False
+
+
+def _heal_pending_files_with_occurrences(
+    connection: sqlite3.Connection,
+    source_id: int,
+) -> int:
+    """Restore interrupted pending invalidation so existing occurrences stay readable.
+
+    Phase 2 originally marked every family pending on any adapter_version change.
+    Pending files still retain prior entity_occurrences until re-index deletes them.
+    Reconstruction only reads status='indexed', so those families appeared as
+    No Snapshot even though the data was still present.
+    """
+    cursor = connection.execute(
+        """
+        UPDATE indexed_files
+        SET status='indexed'
+        WHERE source_id=?
+          AND status='pending'
+          AND id IN (SELECT DISTINCT file_id FROM entity_occurrences)
+        """,
+        (source_id,),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def _sync_family_adapter_versions(
+    connection: sqlite3.Connection,
+    source_id: int,
+) -> set[str]:
+    """Adopt per-family fingerprints and return families that require re-index.
+
+    On first adoption (metadata missing), do not mass-reindex unchanged families.
+    Only families whose fingerprint differs from the previously published map are
+    left with a stale per-file adapter_version so `_needs_reindex` selects them.
+    """
+    current = compute_family_adapter_versions()
+    raw = metadata_value(connection, "family_adapter_versions")
+    changed: set[str] = set()
+    if raw is None:
+        # First adoption after global-hash era: rewrite unchanged families in place.
+        # Managed-device card_columns expansion is the intentional Phase 2 reindex.
+        for family, version in current.items():
+            if family == MANAGED_DEVICES_FAMILY:
+                changed.add(family)
+                continue
+            connection.execute(
+                """
+                UPDATE indexed_files
+                SET adapter_version=?
+                WHERE source_id=? AND family=? AND status='indexed'
+                """,
+                (version, source_id, family),
+            )
+        # Force managed-device selective reindex without hiding other families.
+        connection.execute(
+            """
+            UPDATE indexed_files
+            SET adapter_version=''
+            WHERE source_id=? AND family=? AND status='indexed'
+            """,
+            (source_id, MANAGED_DEVICES_FAMILY),
+        )
+        changed.add(MANAGED_DEVICES_FAMILY)
+    else:
+        try:
+            previous = json.loads(raw)
+        except json.JSONDecodeError:
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+        for family, version in current.items():
+            if previous.get(family) != version:
+                changed.add(family)
+            else:
+                connection.execute(
+                    """
+                    UPDATE indexed_files
+                    SET adapter_version=?
+                    WHERE source_id=? AND family=? AND status='indexed'
+                      AND adapter_version != ?
+                    """,
+                    (version, source_id, family, version),
+                )
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO metadata(key, value)
+        VALUES('family_adapter_versions', ?)
+        """,
+        (json.dumps(current, sort_keys=True, separators=(",", ":")),),
+    )
+    return changed
 
 
 def _ensure_entity_id(
@@ -420,6 +535,9 @@ def _index_supported_file(
             "DELETE FROM alias_observations WHERE file_id=?", (file_id,)
         )
         connection.execute(
+            "DELETE FROM user_device_link_observations WHERE file_id=?", (file_id,)
+        )
+        connection.execute(
             "DELETE FROM entity_occurrences WHERE file_id=?", (file_id,)
         )
         for draft in drafts.values():
@@ -456,7 +574,7 @@ def _index_supported_file(
             for draft in drafts.values():
                 user_id = draft.key.primary_id
                 for alias in draft.aliases:
-                    if alias["kind"] != "upn":
+                    if alias["kind"] not in ("upn", "mail"):
                         continue
                     kind = alias["kind"]
                     value = alias["value"]
@@ -770,20 +888,29 @@ def run_sync(
                 source_id = _ensure_source(connection, reports_dir)
                 _repair_alias_indexed_families(connection, source_id)
 
+                healed = _heal_pending_files_with_occurrences(connection, source_id)
+                if healed:
+                    logger.info(
+                        "Restored %d pending indexed_files that still have occurrences",
+                        healed,
+                    )
+                changed_families = _sync_family_adapter_versions(connection, source_id)
+                if changed_families:
+                    logger.info(
+                        "Selective adapter re-index required for families: %s",
+                        ", ".join(sorted(changed_families)),
+                    )
+                connection.commit()
+
                 if projections_need_repair(connection):
                     emit("repairing_projections", "Repairing entity search index…")
                     repair_search_projections(connection, source_id)
 
                 stored_adapter_version = metadata_value(connection, "adapter_version")
                 if stored_adapter_version and stored_adapter_version != adapter_version:
-                    connection.execute(
-                        """
-                        UPDATE indexed_files
-                        SET status='pending'
-                        WHERE source_id=? AND status='indexed'
-                        """,
-                        (source_id,),
-                    )
+                    # Publish the new overall catalog hash only. Do NOT mass-mark
+                    # unrelated families pending — that hides intact occurrences and
+                    # caused Point-in-Time No Snapshot regressions.
                     connection.execute(
                         "UPDATE metadata SET value=? WHERE key='adapter_version'",
                         (adapter_version,),
@@ -795,6 +922,7 @@ def run_sync(
                         """,
                         (source_id, adapter_version),
                     )
+                    connection.commit()
 
                 cursor = connection.execute(
                     """
@@ -849,7 +977,7 @@ def run_sync(
                         )
                         continue
                     file_id = _get_or_create_file_row(
-                        connection, source_id, item, adapter_version
+                        connection, source_id, item, compute_family_adapter_version(item.family)
                     )
                     if _needs_reindex(connection, file_id, item, adapter_version):
                         to_index.append((file_id, item))
@@ -880,7 +1008,7 @@ def run_sync(
                             source_id,
                             file_id,
                             item,
-                            adapter_version,
+                            compute_family_adapter_version(item.family),
                             affected_entity_ids,
                             stats,
                         )
@@ -918,6 +1046,10 @@ def run_sync(
                                 (row["id"],),
                             )
                             connection.execute(
+                                "DELETE FROM user_device_link_observations WHERE file_id=?",
+                                (row["id"],),
+                            )
+                            connection.execute(
                                 "DELETE FROM entity_occurrences WHERE file_id=?",
                                 (row["id"],),
                             )
@@ -935,6 +1067,20 @@ def run_sync(
                 for entity_id in affected_entity_ids:
                     _finalize_entity(connection, source_id, entity_id)
                 connection.commit()
+
+                managed_device_touched = MANAGED_DEVICES_FAMILY in affected_families
+                if user_device_links_need_build(connection) or managed_device_touched:
+                    emit(
+                        "building_user_device_links",
+                        "Building historical user-device links…",
+                    )
+                    build_user_device_link_projection(
+                        connection,
+                        source_id,
+                        reports_dir,
+                        progress=progress,
+                        generation=generation,
+                    )
 
                 status = "completed_with_errors" if stats.failed else "complete"
                 connection.execute(

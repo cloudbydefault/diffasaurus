@@ -966,6 +966,7 @@ class DiffasaurusWindow(QMainWindow):
             "discovering": "Discovering snapshots",
             "checking": "Checking indexed files",
             "repairing_projections": "Repairing entity search index",
+            "building_user_device_links": "Building historical user-device links",
             "indexing": "Indexing files",
             "resolving_identities": "Resolving dependent identities",
             "recomputing_entities": "Recomputing affected entities",
@@ -985,6 +986,7 @@ class DiffasaurusWindow(QMainWindow):
             total_progress = max(total, 1)
         elif phase in (
             "repairing_projections",
+            "building_user_device_links",
             "resolving_identities",
             "recomputing_entities",
             "checkpointing",

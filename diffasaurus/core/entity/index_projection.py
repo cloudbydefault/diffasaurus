@@ -211,3 +211,207 @@ def ensure_search_projections(
             return repair_search_projections(connection, source_id)
         finally:
             connection.close()
+
+
+# Version 1: ambiguity-aware user↔managed-device link observations.
+USER_DEVICE_LINK_PROJECTION_VERSION = 1
+
+
+@dataclass(frozen=True)
+class UserDeviceLinkProjectionStats:
+    files_processed: int
+    observations_written: int
+    duration_ms: int
+    projection_version: int
+
+
+def user_device_link_projection_version(connection: sqlite3.Connection) -> int:
+    value = metadata_value(connection, "user_device_link_projection_version")
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def user_device_links_need_build(connection: sqlite3.Connection) -> bool:
+    return user_device_link_projection_version(connection) < USER_DEVICE_LINK_PROJECTION_VERSION
+
+
+def user_device_links_need_build_at_path(db_path) -> bool:
+    """Readonly check used by open_existing to decide whether to queue a worker sync."""
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    connection = open_connection(path, readonly=True)
+    try:
+        try:
+            return user_device_links_need_build(connection)
+        except sqlite3.OperationalError:
+            return True
+    finally:
+        connection.close()
+
+
+def replace_file_user_device_link_observations(
+    connection: sqlite3.Connection,
+    observations: list,
+) -> None:
+    """Replace projection rows for the files represented in observations."""
+    import json
+
+    if not observations:
+        return
+    file_ids = {int(item.file_id) for item in observations}
+    for file_id in file_ids:
+        connection.execute(
+            "DELETE FROM user_device_link_observations WHERE file_id=?",
+            (file_id,),
+        )
+    for item in observations:
+        connection.execute(
+            """
+            INSERT INTO user_device_link_observations(
+                source_id, file_id, observed_at, device_entity_id, device_dedup_key,
+                link_kind, normalized_link_value, resolution_status,
+                resolved_user_immutable_id, candidate_user_ids_json, diagnostic,
+                raw_link_data_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.source_id,
+                item.file_id,
+                item.observed_at.isoformat(timespec="seconds"),
+                item.device_entity_id,
+                item.device_dedup_key,
+                item.link_kind,
+                item.normalized_link_value,
+                item.resolution_status,
+                item.resolved_user_immutable_id,
+                json.dumps(sorted(item.candidate_user_ids), separators=(",", ":")),
+                item.diagnostic,
+                item.raw_link_data_json,
+            ),
+        )
+
+
+def build_user_device_link_projection(
+    connection: sqlite3.Connection,
+    source_id: int,
+    reports_dir,
+    *,
+    progress: Callable[[SyncProgressEvent], None] | None = None,
+    generation: int = 0,
+) -> UserDeviceLinkProjectionStats:
+    """Rebuild user_device_link_observations from indexed managed-device CSVs.
+
+    Must run under the entity-index lock. On failure the caller must not bump the
+    projection version; this function commits only after a full successful rebuild.
+    """
+    from pathlib import Path
+
+    from diffasaurus.core.entity.index_schema import ensure_user_device_link_schema
+    from diffasaurus.core.entity.index_sync import (
+        _ensure_entity_id,
+        _load_alias_index_from_db,
+    )
+    from diffasaurus.core.entity.pit_enrichment import MANAGED_DEVICES_FAMILY
+    from diffasaurus.core.entity.user_device_links import (
+        build_observation_records,
+        group_managed_device_rows,
+    )
+    from diffasaurus.core.report_history import read_csv_rows
+
+    ensure_user_device_link_schema(connection)
+    started = time.perf_counter()
+    reports_root = Path(reports_dir)
+    if progress is not None:
+        progress(
+            SyncProgressEvent(
+                phase="building_user_device_links",
+                generation=generation,
+                label="Building historical user-device links…",
+            )
+        )
+
+    files = connection.execute(
+        """
+        SELECT id, relative_path, captured_at
+        FROM indexed_files
+        WHERE source_id=? AND family=? AND status='indexed'
+        ORDER BY captured_at
+        """,
+        (source_id, MANAGED_DEVICES_FAMILY),
+    ).fetchall()
+
+    all_observations = []
+    for file_row in files:
+        file_id = int(file_row["id"])
+        captured_at = datetime_from_iso(file_row["captured_at"])
+        path = reports_root / file_row["relative_path"]
+        if not path.is_file():
+            continue
+        _, rows = read_csv_rows(path)
+        alias_index = _load_alias_index_from_db(connection, source_id, captured_at)
+        grouped = group_managed_device_rows(rows, captured_at, alias_index)
+
+        def _entity_id_for_key(key, _source_id=source_id):
+            return _ensure_entity_id(connection, _source_id, key, key.primary_id)
+
+        observations = build_observation_records(
+            source_id=source_id,
+            file_id=file_id,
+            observed_at=captured_at,
+            grouped=grouped,
+            device_entity_id_for_key=_entity_id_for_key,
+        )
+        all_observations.extend(observations)
+
+    with transaction(connection):
+        connection.execute(
+            "DELETE FROM user_device_link_observations WHERE source_id=?",
+            (source_id,),
+        )
+        if all_observations:
+            replace_file_user_device_link_observations(connection, all_observations)
+        repaired_at = utc_now_iso()
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO metadata(key, value)
+            VALUES('user_device_link_projection_version', ?)
+            """,
+            (str(USER_DEVICE_LINK_PROJECTION_VERSION),),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO metadata(key, value)
+            VALUES('user_device_link_projection_repaired_at', ?)
+            """,
+            (repaired_at,),
+        )
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    stats = UserDeviceLinkProjectionStats(
+        files_processed=len(files),
+        observations_written=len(all_observations),
+        duration_ms=duration_ms,
+        projection_version=USER_DEVICE_LINK_PROJECTION_VERSION,
+    )
+    logger.info(
+        "User-device link projection complete: files=%d observations=%d duration_ms=%d "
+        "projection_version=%d",
+        stats.files_processed,
+        stats.observations_written,
+        stats.duration_ms,
+        stats.projection_version,
+    )
+    return stats
+
+
+def datetime_from_iso(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value)

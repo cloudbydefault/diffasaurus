@@ -7,6 +7,7 @@ SyncPhase = Literal[
     "discovering",
     "checking",
     "repairing_projections",
+    "building_user_device_links",
     "indexing",
     "resolving_identities",
     "recomputing_entities",
