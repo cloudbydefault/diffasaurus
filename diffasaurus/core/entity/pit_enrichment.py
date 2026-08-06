@@ -29,6 +29,35 @@ UserDeviceResolutionStatus = Literal[
 ]
 
 MANAGED_DEVICES_FAMILY = "Intune_ManagedDevices_Compliance"
+AUTOPILOT_FAMILY = "Intune_Devices_Autopilot"
+
+AutopilotMatchStatus = Literal[
+    "matched",
+    "no_match_with_coverage",
+    "no_coverage",
+    "ambiguous",
+    "not_applicable",
+]
+
+
+@dataclass(frozen=True)
+class AutopilotKeyMatch:
+    key_kind: str
+    raw_value: str
+    normalized_value: str
+    resolution_status: Literal["unique", "ambiguous", "absent", "invalid"]
+    matched_row_index: int | None
+    candidate_row_indices: frozenset[int]
+
+
+@dataclass(frozen=True)
+class RelatedAutopilotState:
+    status: AutopilotMatchStatus
+    properties: tuple[SourcedProperty, ...]
+    provenance: SourceProvenance | None
+    key_matches: tuple[AutopilotKeyMatch, ...]
+    matched_row_index: int | None
+    conflict_diagnostic: str
 
 
 @dataclass(frozen=True)
@@ -64,6 +93,12 @@ class RelatedManagedDevice:
 
 
 @dataclass(frozen=True)
+class EnrichedManagedDevice:
+    device: RelatedManagedDevice
+    autopilot: RelatedAutopilotState
+
+
+@dataclass(frozen=True)
 class UserManagedDevicesEnrichment:
     devices: tuple[RelatedManagedDevice, ...]
     coverage: ManagedDevicesCoverage
@@ -72,10 +107,12 @@ class UserManagedDevicesEnrichment:
     snapshot_at: datetime | None
     snapshot_file_id: int | None
     source_relative_path: str = ""
+    enriched_devices: tuple[EnrichedManagedDevice, ...] = ()
+    autopilot_family_coverage: FamilyCoverage | None = None
 
 
 @dataclass(frozen=True)
 class UserPointInTimeEnrichment:
-    """Combined Point-in-Time enrichment. Autopilot is stubbed until Phase 3."""
+    """Combined Point-in-Time enrichment including managed devices and Autopilot."""
 
     managed_devices: UserManagedDevicesEnrichment

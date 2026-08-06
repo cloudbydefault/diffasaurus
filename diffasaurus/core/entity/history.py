@@ -625,3 +625,61 @@ def enrich_user_managed_devices(
         user_alias_values=alias_values,
     )
     return result
+
+
+def enrich_user_managed_devices_with_autopilot(
+    user_key: CanonicalEntityKey,
+    families: dict[str, list[ReportSnapshot]],
+    target: datetime,
+):
+    """Legacy CSV path for managed-device + Autopilot enrichment."""
+    from diffasaurus.core.entity.autopilot_matching import (
+        build_autopilot_snapshot_index,
+        enrich_managed_devices_with_autopilot,
+    )
+    from diffasaurus.core.entity.pit_enrichment import AUTOPILOT_FAMILY
+
+    base = enrich_user_managed_devices(user_key, families, target)
+    adapter = ADAPTERS_BY_FAMILY.get(AUTOPILOT_FAMILY)
+    if adapter is None:
+        return enrich_managed_devices_with_autopilot(
+            base,
+            None,
+            target=target,
+            autopilot_snapshot_at=None,
+            autopilot_source_relative_path="",
+        )
+
+    snapshots = snapshots_for_adapter(families, AUTOPILOT_FAMILY)
+    snapshot = snapshot_at_or_before(snapshots, target)
+    if snapshot is None:
+        return enrich_managed_devices_with_autopilot(
+            base,
+            None,
+            target=target,
+            autopilot_snapshot_at=None,
+            autopilot_source_relative_path="",
+        )
+
+    _, rows = load_snapshot_rows(snapshot)
+    property_rows: list[tuple[SourcedProperty, ...]] = []
+    for row in rows:
+        property_rows.append(
+            tuple(
+                SourcedProperty(
+                    family=adapter.family,
+                    name=name,
+                    value=value,
+                    observed_at=snapshot.captured_at,
+                )
+                for name, value in adapter.card_properties(row, snapshot.captured_at)
+            )
+        )
+    index = build_autopilot_snapshot_index(property_rows)
+    return enrich_managed_devices_with_autopilot(
+        base,
+        index,
+        target=target,
+        autopilot_snapshot_at=snapshot.captured_at,
+        autopilot_source_relative_path=snapshot.path.name,
+    )
