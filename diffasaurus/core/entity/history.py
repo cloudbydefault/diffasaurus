@@ -46,6 +46,15 @@ def _extract_upn(adapter: ReportFamilyAdapter, row: dict[str, str]) -> str:
     return ""
 
 
+def _extract_mail(adapter: ReportFamilyAdapter, row: dict[str, str]) -> str:
+    for alias in adapter.alias_columns:
+        if alias.kind == "mail":
+            value = _row_value(row, alias.column)
+            if value:
+                return value
+    return ""
+
+
 def build_alias_binding_index(
     families: dict[str, list[ReportSnapshot]],
     max_observed_at: datetime | None = None,
@@ -62,11 +71,22 @@ def build_alias_binding_index(
             _, rows = load_snapshot_rows(snapshot)
             for row in rows:
                 user_id = adapter.canonical_value(row)
+                if not user_id:
+                    continue
                 upn = _extract_upn(adapter, row)
-                if user_id and upn:
+                if upn:
                     index.record(
                         "upn",
                         upn.lower(),
+                        snapshot.captured_at,
+                        user_id,
+                        adapter.family,
+                    )
+                mail = _extract_mail(adapter, row)
+                if mail:
+                    index.record(
+                        "mail",
+                        mail.lower(),
                         snapshot.captured_at,
                         user_id,
                         adapter.family,
@@ -484,3 +504,124 @@ def reconstruct_entity_state(
         scalar_properties_by_family=scalar_properties_by_family,
         relationships_by_family=relationships_by_family,
     )
+
+
+def user_alias_values_at(
+    alias_index: AliasBindingIndex,
+    user_immutable_id: str,
+    as_of: datetime,
+) -> set[str]:
+    """Normalized alias values historically bound to the user at or before as_of."""
+    return alias_index.values_for_immutable_id(user_immutable_id, as_of)
+
+def enrich_user_managed_devices(
+    user_key: CanonicalEntityKey,
+    families: dict[str, list[ReportSnapshot]],
+    target: datetime,
+):
+    """Legacy CSV path for user→managed-device enrichment (semantically equivalent)."""
+    from diffasaurus.core.entity.pit_enrichment import (
+        MANAGED_DEVICES_FAMILY,
+        RelatedManagedDevice,
+        UserManagedDevicesEnrichment,
+    )
+    from diffasaurus.core.entity.pit_presentation import (
+        ProvenanceObservation,
+        single_provenance,
+    )
+    from diffasaurus.core.entity.user_device_links import (
+        build_enrichment_from_observations,
+        build_observation_records,
+        group_managed_device_rows,
+        properties_from_managed_row,
+    )
+
+    if user_key.entity_type != "user":
+        raise ValueError("Managed-device enrichment requires a user entity key")
+
+    alias_index = build_alias_binding_index(families, max_observed_at=target)
+    adapter = ADAPTERS_BY_FAMILY[MANAGED_DEVICES_FAMILY]
+    snapshots = snapshots_for_adapter(families, MANAGED_DEVICES_FAMILY)
+    snapshot = snapshot_at_or_before(snapshots, target)
+    if snapshot is None:
+        return build_enrichment_from_observations(
+            user_key=user_key,
+            target=target,
+            snapshot_at=None,
+            snapshot_file_id=None,
+            source_relative_path="",
+            authoritative_inventory=adapter.authoritative_inventory,
+            observations=(),
+            devices=(),
+            user_alias_values=set(),
+        )
+
+    _, rows = load_snapshot_rows(snapshot)
+    grouped = group_managed_device_rows(rows, snapshot.captured_at, alias_index)
+    # Legacy path uses synthetic entity ids (dedup order) for observation identity.
+    key_to_id: dict[str, int] = {}
+    next_id = 1
+
+    def _entity_id_for_key(key: CanonicalEntityKey) -> int:
+        nonlocal next_id
+        label = key.label()
+        if label not in key_to_id:
+            key_to_id[label] = next_id
+            next_id += 1
+        return key_to_id[label]
+
+    observations = build_observation_records(
+        source_id=0,
+        file_id=0,
+        observed_at=snapshot.captured_at,
+        grouped=grouped,
+        device_entity_id_for_key=_entity_id_for_key,
+    )
+    alias_values = user_alias_values_at(alias_index, user_key.primary_id, snapshot.captured_at)
+    devices: list[RelatedManagedDevice] = []
+    observation_by_dedup = {item.device_dedup_key: item for item in observations}
+    for item in grouped:
+        if item.outcome.status != "resolved":
+            continue
+        if item.outcome.resolved_user_immutable_id != user_key.primary_id:
+            continue
+        if item.device_key is None:
+            continue
+        obs = observation_by_dedup[item.dedup_key]
+        props = properties_from_managed_row(item.rows[0], snapshot.captured_at, adapter)
+        provenance = single_provenance(
+            ProvenanceObservation(
+                family=MANAGED_DEVICES_FAMILY,
+                observed_at=snapshot.captured_at,
+                snapshot_at=snapshot.captured_at,
+                requested_at=target,
+                gap=target - snapshot.captured_at,
+            )
+        )
+        devices.append(
+            RelatedManagedDevice(
+                device_key=item.device_key,
+                dedup_key=item.dedup_key,
+                properties=props,
+                provenance=provenance,
+                link_kind=obs.link_kind,
+                normalized_link_value=obs.normalized_link_value,
+                resolution_status=obs.resolution_status,
+                resolved_user_immutable_id=obs.resolved_user_immutable_id,
+                candidate_user_ids=obs.candidate_user_ids,
+                diagnostic=obs.diagnostic,
+            )
+        )
+
+    result: UserManagedDevicesEnrichment = build_enrichment_from_observations(
+        user_key=user_key,
+        target=target,
+        snapshot_at=snapshot.captured_at,
+        snapshot_file_id=0,
+        source_relative_path=snapshot.path.name,
+        authoritative_inventory=adapter.authoritative_inventory,
+        observations=observations,
+        devices=tuple(devices),
+        user_alias_values=alias_values,
+    )
+    return result

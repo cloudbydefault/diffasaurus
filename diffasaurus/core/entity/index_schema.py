@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS metadata (
@@ -149,6 +149,37 @@ CREATE INDEX IF NOT EXISTS idx_occurrences_file
     ON entity_occurrences(file_id);
 """
 
+_USER_DEVICE_LINK_DDL = """
+CREATE TABLE IF NOT EXISTS user_device_link_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES report_sources(id),
+    file_id INTEGER NOT NULL REFERENCES indexed_files(id) ON DELETE CASCADE,
+    observed_at TEXT NOT NULL,
+    device_entity_id INTEGER NOT NULL REFERENCES entities(id),
+    device_dedup_key TEXT NOT NULL,
+    link_kind TEXT NOT NULL,
+    normalized_link_value TEXT NOT NULL DEFAULT '',
+    resolution_status TEXT NOT NULL,
+    resolved_user_immutable_id TEXT,
+    candidate_user_ids_json TEXT NOT NULL DEFAULT '[]',
+    diagnostic TEXT NOT NULL DEFAULT '',
+    raw_link_data_json TEXT NOT NULL DEFAULT '',
+    UNIQUE(file_id, device_dedup_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_udlo_resolved_user
+    ON user_device_link_observations(
+        source_id, file_id, resolved_user_immutable_id
+    )
+    WHERE resolution_status = 'resolved';
+
+CREATE INDEX IF NOT EXISTS idx_udlo_file_status
+    ON user_device_link_observations(source_id, file_id, resolution_status);
+
+CREATE INDEX IF NOT EXISTS idx_udlo_file
+    ON user_device_link_observations(file_id);
+"""
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
@@ -180,8 +211,13 @@ def _create_fts5(connection: sqlite3.Connection) -> None:
     )
 
 
+def ensure_user_device_link_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(_USER_DEVICE_LINK_DDL)
+
+
 def initialize_schema(connection: sqlite3.Connection, adapter_version: str) -> bool:
     connection.executescript(_DDL)
+    ensure_user_device_link_schema(connection)
     fts5_available = probe_fts5(connection)
     if fts5_available:
         _create_fts5(connection)
@@ -204,6 +240,32 @@ def initialize_schema(connection: sqlite3.Connection, adapter_version: str) -> b
     return fts5_available
 
 
+def migrate_schema_if_needed(connection: sqlite3.Connection, adapter_version: str) -> None:
+    try:
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is None:
+        initialize_schema(connection, adapter_version)
+        connection.commit()
+        return
+    stored_version = int(row["value"] if isinstance(row, sqlite3.Row) else row[0])
+    if stored_version == SCHEMA_VERSION:
+        ensure_user_device_link_schema(connection)
+        return
+    if stored_version == 1 and SCHEMA_VERSION == 2:
+        ensure_user_device_link_schema(connection)
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
+        return
+    raise RuntimeError(f"Unsupported entity index schema version {stored_version}")
+
+
 def open_connection(
     db_path: Path,
     *,
@@ -223,20 +285,7 @@ def open_connection(
         connection.execute(f"PRAGMA journal_mode={journal_mode}")
         connection.execute("PRAGMA synchronous=NORMAL")
         if adapter_version is not None:
-            try:
-                row = connection.execute(
-                    "SELECT value FROM metadata WHERE key='schema_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                row = None
-            if row is None:
-                initialize_schema(connection, adapter_version)
-            else:
-                stored_version = int(row["value"])
-                if stored_version != SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"Unsupported entity index schema version {stored_version}"
-                    )
+            migrate_schema_if_needed(connection, adapter_version)
     return connection
 
 

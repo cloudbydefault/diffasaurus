@@ -221,6 +221,8 @@ class EntityIndexRepository:
                     "projection_repaired_at",
                     "alias_projection_version",
                     "search_projection_version",
+                    "user_device_link_projection_version",
+                    "user_device_link_projection_repaired_at",
                 ):
                     value = metadata_value(connection, key)
                     if value:
@@ -1015,3 +1017,237 @@ class EntityIndexRepository:
                 (self._source_id,),
             ).fetchone()["count"]
         return {"entity_count": int(entity_count), "files_indexed": int(file_count)}
+
+    def _user_alias_values(
+        self,
+        connection: sqlite3.Connection,
+        user_immutable_id: str,
+        as_of: datetime,
+    ) -> set[str]:
+        values: set[str] = set()
+        for row in connection.execute(
+            """
+            SELECT normalized_value
+            FROM alias_observations
+            WHERE source_id=? AND immutable_id=? AND observed_at <= ?
+            """,
+            (
+                self._source_id,
+                user_immutable_id,
+                as_of.isoformat(timespec="seconds"),
+            ),
+        ):
+            values.add(str(row["normalized_value"]))
+        return values
+
+    def _row_to_link_observation(self, row: sqlite3.Row):
+        from diffasaurus.core.entity.pit_enrichment import UserDeviceLinkObservation
+
+        candidates_raw = json.loads(row["candidate_user_ids_json"] or "[]")
+        return UserDeviceLinkObservation(
+            source_id=int(row["source_id"]),
+            file_id=int(row["file_id"]),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            device_entity_id=int(row["device_entity_id"]),
+            device_dedup_key=str(row["device_dedup_key"]),
+            link_kind=str(row["link_kind"]),
+            normalized_link_value=str(row["normalized_link_value"] or ""),
+            resolution_status=row["resolution_status"],
+            resolved_user_immutable_id=row["resolved_user_immutable_id"],
+            candidate_user_ids=frozenset(str(item) for item in candidates_raw),
+            diagnostic=str(row["diagnostic"] or ""),
+            raw_link_data_json=str(row["raw_link_data_json"] or ""),
+        )
+
+    def user_managed_devices_at(
+        self,
+        user_key: CanonicalEntityKey,
+        target: datetime,
+    ):
+        """Return managed devices historically associated with the user at target.
+
+        Uses the latest Intune_ManagedDevices_Compliance snapshot at or before target.
+        Opens a short-lived thread-safe SQLite connection (safe from PIT workers).
+        """
+        from diffasaurus.core.entity.adapters import DEVICE_MANAGED
+        from diffasaurus.core.entity.index_projection import (
+            user_device_link_projection_version,
+        )
+        from diffasaurus.core.entity.pit_enrichment import (
+            MANAGED_DEVICES_FAMILY,
+            RelatedManagedDevice,
+            UserManagedDevicesEnrichment,
+        )
+        from diffasaurus.core.entity.pit_presentation import (
+            ProvenanceObservation,
+            single_provenance,
+        )
+        from diffasaurus.core.entity.user_device_links import (
+            build_enrichment_from_observations,
+        )
+
+        if user_key.entity_type != "user":
+            raise ValueError("user_managed_devices_at requires a user entity key")
+
+        with _connect(self._db_path, readonly=self._readonly) as connection:
+            try:
+                projection_ready = user_device_link_projection_version(connection) >= 1
+            except sqlite3.OperationalError:
+                projection_ready = False
+
+            file_row = self._latest_indexed_file_row(
+                connection,
+                MANAGED_DEVICES_FAMILY,
+                target,
+            )
+            if file_row is None:
+                return build_enrichment_from_observations(
+                    user_key=user_key,
+                    target=target,
+                    snapshot_at=None,
+                    snapshot_file_id=None,
+                    source_relative_path="",
+                    authoritative_inventory=DEVICE_MANAGED.authoritative_inventory,
+                    observations=(),
+                    devices=(),
+                    user_alias_values=set(),
+                )
+
+            snapshot_at = datetime.fromisoformat(file_row["captured_at"])
+            file_id = int(file_row["id"])
+            source_relative_path = str(file_row["relative_path"] or "")
+            alias_values = self._user_alias_values(
+                connection, user_key.primary_id, snapshot_at
+            )
+
+            if not projection_ready:
+                # Snapshot exists but projection not published yet — do not invent zero.
+                return build_enrichment_from_observations(
+                    user_key=user_key,
+                    target=target,
+                    snapshot_at=snapshot_at,
+                    snapshot_file_id=file_id,
+                    source_relative_path=source_relative_path,
+                    authoritative_inventory=False,
+                    observations=(),
+                    devices=(),
+                    user_alias_values=alias_values,
+                )
+
+            resolved_rows = connection.execute(
+                """
+                SELECT *
+                FROM user_device_link_observations
+                WHERE source_id=? AND file_id=? AND resolution_status='resolved'
+                  AND resolved_user_immutable_id=?
+                ORDER BY device_dedup_key
+                """,
+                (self._source_id, file_id, user_key.primary_id),
+            ).fetchall()
+
+            unresolved_rows = connection.execute(
+                """
+                SELECT *
+                FROM user_device_link_observations
+                WHERE source_id=? AND file_id=? AND resolution_status != 'resolved'
+                ORDER BY device_dedup_key
+                """,
+                (self._source_id, file_id),
+            ).fetchall()
+
+            all_observations = tuple(
+                self._row_to_link_observation(row)
+                for row in (*resolved_rows, *unresolved_rows)
+            )
+
+            device_ids = [int(row["device_entity_id"]) for row in resolved_rows]
+            occurrence_by_entity: dict[int, sqlite3.Row] = {}
+            entity_by_id: dict[int, sqlite3.Row] = {}
+            if device_ids:
+                placeholders = ",".join("?" * len(device_ids))
+                for row in connection.execute(
+                    f"""
+                    SELECT id, entity_type, primary_id, display_name
+                    FROM entities
+                    WHERE id IN ({placeholders})
+                    """,
+                    device_ids,
+                ):
+                    entity_by_id[int(row["id"])] = row
+                for row in connection.execute(
+                    f"""
+                    SELECT eo.*
+                    FROM entity_occurrences eo
+                    WHERE eo.file_id=? AND eo.entity_id IN ({placeholders})
+                    """,
+                    (file_id, *device_ids),
+                ):
+                    occurrence_by_entity[int(row["entity_id"])] = row
+
+            devices: list[RelatedManagedDevice] = []
+            for link_row in resolved_rows:
+                entity_id = int(link_row["device_entity_id"])
+                entity = entity_by_id.get(entity_id)
+                if entity is None:
+                    continue
+                occurrence = occurrence_by_entity.get(entity_id)
+                props: list[SourcedProperty] = []
+                if occurrence is not None:
+                    for item in json.loads(occurrence["scalar_properties_json"] or "[]"):
+                        props.append(
+                            SourcedProperty(
+                                family=item["family"],
+                                name=item["name"],
+                                value=item["value"],
+                                observed_at=datetime.fromisoformat(item["observed_at"]),
+                            )
+                        )
+                obs = self._row_to_link_observation(link_row)
+                provenance = single_provenance(
+                    ProvenanceObservation(
+                        family=MANAGED_DEVICES_FAMILY,
+                        observed_at=snapshot_at,
+                        snapshot_at=snapshot_at,
+                        requested_at=target,
+                        gap=target - snapshot_at,
+                    )
+                )
+                devices.append(
+                    RelatedManagedDevice(
+                        device_key=CanonicalEntityKey(
+                            entity["entity_type"], entity["primary_id"]
+                        ),
+                        dedup_key=obs.device_dedup_key,
+                        properties=tuple(props),
+                        provenance=provenance,
+                        link_kind=obs.link_kind,
+                        normalized_link_value=obs.normalized_link_value,
+                        resolution_status=obs.resolution_status,
+                        resolved_user_immutable_id=obs.resolved_user_immutable_id,
+                        candidate_user_ids=obs.candidate_user_ids,
+                        diagnostic=obs.diagnostic,
+                    )
+                )
+
+            enrichment: UserManagedDevicesEnrichment = build_enrichment_from_observations(
+                user_key=user_key,
+                target=target,
+                snapshot_at=snapshot_at,
+                snapshot_file_id=file_id,
+                source_relative_path=source_relative_path,
+                authoritative_inventory=DEVICE_MANAGED.authoritative_inventory,
+                observations=all_observations,
+                devices=tuple(devices),
+                user_alias_values=alias_values,
+            )
+            return enrichment
+    def enrich_user_point_in_time(
+        self,
+        user_key: CanonicalEntityKey,
+        target: datetime,
+    ):
+        from diffasaurus.core.entity.pit_enrichment import UserPointInTimeEnrichment
+
+        return UserPointInTimeEnrichment(
+            managed_devices=self.user_managed_devices_at(user_key, target),
+        )

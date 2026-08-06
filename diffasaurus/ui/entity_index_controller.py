@@ -60,7 +60,10 @@ class EntityIndexController(QObject):
         return self._generation
 
     def open_existing(self, reports_dir: Path):
-        from diffasaurus.core.entity.index_projection import ensure_search_projections
+        from diffasaurus.core.entity.index_projection import (
+            ensure_search_projections,
+            user_device_links_need_build_at_path,
+        )
         from diffasaurus.core.entity.index_repository import EntityIndexRepository
 
         normalized = normalize_reports_path(reports_dir)
@@ -75,6 +78,7 @@ class EntityIndexController(QObject):
             db_path.is_file(),
         )
         repair_stats = None
+        needs_user_device_links = False
         if db_path.is_file():
             repair_stats = ensure_search_projections(
                 normalized,
@@ -97,6 +101,8 @@ class EntityIndexController(QObject):
                     repair_stats.alias_projection_version,
                     repair_stats.search_projection_version,
                 )
+            # User-device link projection is worker-only — never rebuild CSVs here.
+            needs_user_device_links = user_device_links_need_build_at_path(db_path)
         if self._repository is not None:
             self._repository.close()
         self._repository = EntityIndexRepository.open(normalized, db_path=db_path)
@@ -108,8 +114,14 @@ class EntityIndexController(QObject):
             logger.info("Entity index repository opened for source_key=%s", key)
         else:
             logger.info("Entity index repository unavailable for source_key=%s", key)
+        if needs_user_device_links and self._sync_state != "running":
+            logger.info(
+                "Queueing entity index sync for user-device link projection repair "
+                "(source_key=%s)",
+                key,
+            )
+            self.start_sync(normalized)
         return self._repository
-
     def close_repository(self) -> None:
         if self._repository is not None:
             self._repository.close()

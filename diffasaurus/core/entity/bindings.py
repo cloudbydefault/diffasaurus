@@ -65,3 +65,11 @@ class AliasBindingIndex:
         if len(immutable_ids) > 1:
             return ResolvedAlias(status="ambiguous", candidates=frozenset(immutable_ids))
         return ResolvedAlias(status="bound", immutable_id=at_newest[0].immutable_id)
+
+    def values_for_immutable_id(self, immutable_id: str, as_of: datetime) -> set[str]:
+        """Normalized alias values observed for an immutable id at or before as_of."""
+        return {
+            observation.normalized_value
+            for observation in self._observations
+            if observation.immutable_id == immutable_id and observation.observed_at <= as_of
+        }
