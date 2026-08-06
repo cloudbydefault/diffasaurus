@@ -107,6 +107,8 @@ class FamilyCoverage:
     snapshot_at: datetime | None
     gap: timedelta | None
     entity_present: bool
+    source_relative_path: str = ""
+    source_report_family: str = ""
 
 
 @dataclass(frozen=True)

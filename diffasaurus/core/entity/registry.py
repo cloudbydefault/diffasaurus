@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from diffasaurus.core.entity.adapters import ALL_ADAPTERS, ReportFamilyAdapter
+from diffasaurus.core.entity.family_aliases import canonical_entity_family
 from diffasaurus.core.entity.types import EntityType
 
 ADAPTERS_BY_FAMILY: dict[str, ReportFamilyAdapter] = {
@@ -17,7 +18,7 @@ ADAPTERS_BY_TYPE: dict[EntityType, tuple[ReportFamilyAdapter, ...]] = {
 
 
 def adapter_for_family(family: str) -> ReportFamilyAdapter | None:
-    return ADAPTERS_BY_FAMILY.get(family)
+    return ADAPTERS_BY_FAMILY.get(canonical_entity_family(family))
 
 
 def adapters_for_type(entity_type: EntityType) -> tuple[ReportFamilyAdapter, ...]:

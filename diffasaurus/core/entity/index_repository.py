@@ -17,9 +17,11 @@ from diffasaurus.core.entity.history import (
     present_at_target,
     resolve_period_pair,
 )
+from diffasaurus.core.entity.family_aliases import entity_family_names_for_adapter
 from diffasaurus.core.entity.index_paths import entity_index_path
 from diffasaurus.core.entity.index_schema import fts5_enabled, open_connection
 from diffasaurus.core.entity.registry import adapters_for_type
+from diffasaurus.core.report_history import report_family
 from diffasaurus.core.entity.resolution import SearchResult
 from diffasaurus.core.entity.types import (
     CanonicalEntityKey,
@@ -686,6 +688,45 @@ class EntityIndexRepository:
             (entity_id, family, target.isoformat(timespec="seconds")),
         ).fetchone()
 
+    def _latest_indexed_file_row(
+        self,
+        connection: sqlite3.Connection,
+        canonical_family: str,
+        target: datetime,
+    ) -> sqlite3.Row | None:
+        families = entity_family_names_for_adapter(canonical_family)
+        placeholders = ",".join("?" * len(families))
+        return connection.execute(
+            f"""
+            SELECT id, captured_at, family, relative_path
+            FROM indexed_files
+            WHERE source_id=? AND family IN ({placeholders}) AND status='indexed'
+              AND captured_at <= ?
+            ORDER BY captured_at DESC LIMIT 1
+            """,
+            (
+                self._source_id,
+                *families,
+                target.isoformat(timespec="seconds"),
+            ),
+        ).fetchone()
+
+    def _occurrence_for_file(
+        self,
+        connection: sqlite3.Connection,
+        entity_id: int,
+        file_id: int,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT eo.*, f.captured_at AS snapshot_captured_at
+            FROM entity_occurrences eo
+            JOIN indexed_files f ON f.id = eo.file_id
+            WHERE eo.entity_id=? AND eo.file_id=?
+            """,
+            (entity_id, file_id),
+        ).fetchone()
+
     def _deserialize_state(
         self,
         entity_key: CanonicalEntityKey,
@@ -694,6 +735,9 @@ class EntityIndexRepository:
         occurrence: sqlite3.Row | None,
         status: str,
         snapshot_at: datetime | None,
+        *,
+        source_relative_path: str = "",
+        source_report_family: str = "",
     ) -> tuple[FamilyCoverage, tuple[SourcedProperty, ...], tuple[ScopedRelationship, ...]]:
         gap = None
         if snapshot_at is not None:
@@ -705,6 +749,8 @@ class EntityIndexRepository:
             snapshot_at=snapshot_at,
             gap=gap,
             entity_present=status == "snapshot_used",
+            source_relative_path=source_relative_path,
+            source_report_family=source_report_family,
         )
         if occurrence is None or status != "snapshot_used":
             return coverage, (), ()
@@ -763,32 +809,25 @@ class EntityIndexRepository:
             ).fetchone()["id"]
 
             for adapter in adapters_for_type(entity_key.entity_type):
-                latest_snapshot = connection.execute(
-                    """
-                    SELECT captured_at FROM indexed_files
-                    WHERE source_id=? AND family=? AND status='indexed'
-                      AND captured_at <= ?
-                    ORDER BY captured_at DESC LIMIT 1
-                    """,
-                    (
-                        self._source_id,
-                        adapter.family,
-                        target.isoformat(timespec="seconds"),
-                    ),
-                ).fetchone()
-                if latest_snapshot is None:
+                file_row = self._latest_indexed_file_row(
+                    connection,
+                    adapter.family,
+                    target,
+                )
+                if file_row is None:
                     coverage, _, _ = self._deserialize_state(
                         entity_key, target, adapter.family, None, "no_snapshot", None
                     )
                     coverage_items.append(coverage)
                     family_coverage[adapter.family] = _family_coverage_label("no_snapshot", None)
                     continue
-                snapshot_at = datetime.fromisoformat(latest_snapshot["captured_at"])
-                occurrence = self._occurrence_at_or_before(
+                snapshot_at = datetime.fromisoformat(file_row["captured_at"])
+                source_relative_path = str(file_row["relative_path"] or "")
+                source_report_family = report_family(source_relative_path)
+                occurrence = self._occurrence_for_file(
                     connection,
                     entity_id,
-                    adapter.family,
-                    target,
+                    int(file_row["id"]),
                 )
                 if occurrence is None:
                     coverage, _, _ = self._deserialize_state(
@@ -798,6 +837,8 @@ class EntityIndexRepository:
                         None,
                         "entity_absent",
                         snapshot_at,
+                        source_relative_path=source_relative_path,
+                        source_report_family=source_report_family,
                     )
                     coverage_items.append(coverage)
                     family_coverage[adapter.family] = _family_coverage_label(
@@ -812,6 +853,8 @@ class EntityIndexRepository:
                     occurrence,
                     "snapshot_used",
                     snapshot_at,
+                    source_relative_path=source_relative_path,
+                    source_report_family=source_report_family,
                 )
                 coverage_items.append(coverage)
                 family_coverage[adapter.family] = _family_coverage_label(

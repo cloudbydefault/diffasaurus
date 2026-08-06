@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
+from diffasaurus.core.entity.pit_auth_methods import (
+    AUTH_METHODS_FAMILY,
+    ParsedAuthMethods,
+    auth_methods_collection_provenance,
+    build_parsed_auth_methods,
+)
 from diffasaurus.core.entity.pit_field_registry import (
     AUTHORITY_ORDER,
     RELATIONSHIP_COLLECTIONS,
@@ -128,6 +134,8 @@ class PointInTimeSourceDetails:
     scalar_properties_by_family: dict[str, tuple[SourcedProperty, ...]]
     relationships_by_family: dict[str, tuple[ScopedRelationship, ...]]
     family_coverage_labels: dict[str, str]
+    auth_methods: ParsedAuthMethods | None = None
+    family_source_info: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -254,6 +262,8 @@ def _build_scalar_fields(
                 continue
             spec = lookup_property_binding(entity_type, family, prop.name)
             if spec is None:
+                continue
+            if spec.key == "authentication_methods":
                 continue
             obs = _observation_for_property(prop, coverage, state.as_of)
             key = spec.key
@@ -429,6 +439,36 @@ def _build_collection(
     )
 
 
+def _build_auth_methods_collection(parsed: ParsedAuthMethods) -> CardCollection | None:
+    if parsed.coverage in ("no_coverage", "unknown"):
+        return None
+
+    provenance = auth_methods_collection_provenance(parsed)
+    items: list[CardCollectionItem] = []
+    for method in parsed.methods:
+        items.append(
+            CardCollectionItem(
+                primary_label=method,
+                secondary_label="",
+                detail="",
+                provenance=provenance,
+                sort_key=method.casefold(),
+            )
+        )
+    items.sort(key=lambda item: item.sort_key)
+
+    coverage: CollectionCoverageStatus = (
+        "known_empty" if parsed.coverage == "known_empty" else "populated"
+    )
+    return CardCollection(
+        collection_id="authentication_methods",
+        title="Authentication methods",
+        coverage=coverage,
+        items=tuple(items),
+        source_family=AUTH_METHODS_FAMILY,
+    )
+
+
 def build_point_in_time_card(
     state: EntityState,
     *,
@@ -450,6 +490,12 @@ def build_point_in_time_card(
             continue
         collections_by_section.setdefault(spec.section_id, []).append(collection)
 
+    parsed_auth_methods = build_parsed_auth_methods(state)
+    if parsed_auth_methods is not None:
+        auth_collection = _build_auth_methods_collection(parsed_auth_methods)
+        if auth_collection is not None:
+            collections_by_section.setdefault("authentication", []).append(auth_collection)
+
     sections: list[CardSection] = []
     for section_id in SECTION_ORDER.get(state.key.entity_type, ()):
         fields = tuple(fields_by_section.get(section_id, ()))
@@ -470,6 +516,12 @@ def build_point_in_time_card(
         scalar_properties_by_family=dict(state.scalar_properties_by_family),
         relationships_by_family=dict(state.relationships_by_family),
         family_coverage_labels=_family_coverage_labels(state),
+        auth_methods=parsed_auth_methods,
+        family_source_info={
+            item.family: (item.source_relative_path, item.source_report_family)
+            for item in state.coverage
+            if item.source_relative_path or item.source_report_family
+        },
     )
 
     return PointInTimeCardModel(

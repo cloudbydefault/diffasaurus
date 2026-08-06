@@ -37,6 +37,14 @@ def _section(model, section_id: str):
     return None
 
 
+def _collection(model, collection_id: str):
+    for section in model.sections:
+        for collection in section.collections:
+            if collection.collection_id == collection_id:
+                return collection
+    return None
+
+
 class PitUserFieldCoverageTests(unittest.TestCase):
     def setUp(self):
         clear_parse_cache()
@@ -153,7 +161,11 @@ class PitUserFieldCoverageTests(unittest.TestCase):
             self.assertIsNotNone(_field(model, "manager_display_name"))
             self.assertIsNotNone(_field(model, "last_interactive_sign_in"))
             self.assertIsNotNone(_field(model, "mfa_registered"))
-            self.assertIsNotNone(_field(model, "authentication_methods"))
+            collection = _collection(model, "authentication_methods")
+            self.assertIsNotNone(collection)
+            assert collection is not None
+            self.assertEqual(len(collection.items), 1)
+            self.assertEqual(collection.items[0].primary_label, "microsoftAuthenticator")
             auth_section = _section(model, "authentication")
             self.assertIsNotNone(auth_section)
             self.assertEqual(auth_section.title, "Authentication and activity")
