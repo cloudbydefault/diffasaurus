@@ -1320,3 +1320,24 @@ class EntityIndexRepository:
         return UserPointInTimeEnrichment(
             managed_devices=self.user_managed_devices_with_autopilot_at(user_key, target),
         )
+
+    def reconstruct_point_in_time(
+        self,
+        entity_key: CanonicalEntityKey,
+        target: datetime,
+    ):
+        from diffasaurus.core.entity.pit_presentation import PointInTimeReconstructionResult
+
+        state = self.reconstruct_state(entity_key, target)
+        enrichment = None
+        error = None
+        if entity_key.entity_type == "user":
+            try:
+                enrichment = self.enrich_user_point_in_time(entity_key, target)
+            except Exception as exc:
+                error = str(exc)
+        return PointInTimeReconstructionResult(
+            state=state,
+            enrichment=enrichment,
+            enrichment_error=error,
+        )

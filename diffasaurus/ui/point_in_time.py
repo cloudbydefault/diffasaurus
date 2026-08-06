@@ -15,7 +15,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from diffasaurus.core.entity.pit_presentation import build_point_in_time_card
+from diffasaurus.core.entity.pit_presentation import (
+    build_point_in_time_card,
+    PointInTimeReconstructionResult,
+)
 from diffasaurus.core.entity.resolution import EntityResolver, build_entity_resolver
 from diffasaurus.core.entity.types import EntityPresenceStatus, EntityRecord, EntityState
 from diffasaurus.core.report_history import ReportSnapshot
@@ -183,7 +186,8 @@ class PointInTimePage(QWidget):
             self.datetime_selector.set_datetime(target)
         self.entity_selector.select_record(record)
 
-    def apply_state(self, state: EntityState, record: EntityRecord) -> None:
+    def apply_reconstruction(self, result: PointInTimeReconstructionResult, record: EntityRecord) -> None:
+        state = result.state
         self._state = state
         self._selected = record
         self.summary_title.setText(record.display_name)
@@ -219,10 +223,18 @@ class PointInTimePage(QWidget):
             state,
             display_name=record.display_name,
             history_range=history_range,
+            enrichment=result.enrichment,
+            enrichment_error=result.enrichment_error,
         )
         self.summary_families.setText(model.coverage_summary)
         self.identity_card.set_model(model)
         self.source_details_panel.set_details(state.key.entity_type, model.source_details)
+
+    def apply_state(self, state: EntityState, record: EntityRecord) -> None:
+        self.apply_reconstruction(
+            PointInTimeReconstructionResult(state=state),
+            record,
+        )
 
     def show_loading(self) -> None:
         self.summary_title.setText("Reconstructing…")
