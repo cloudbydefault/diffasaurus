@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
 
 from diffasaurus.core.entity.feature import persistent_entity_index_enabled
 from diffasaurus.core.entity.index_paths import entity_index_path, normalize_reports_path, source_key
-from diffasaurus.core.entity.history import reconstruct_entity_state
+from diffasaurus.core.entity.history import reconstruct_entity_state, reconstruct_point_in_time_with_enrichment
 from diffasaurus.core.entity.resolution import EntityIndexCancelled, build_entity_resolver
 from diffasaurus.core.entity.types import EntityIndexStats
 from diffasaurus.core.report_history import (
@@ -1629,23 +1629,23 @@ class DiffasaurusWindow(QMainWindow):
         ):
             repository = self._entity_index_controller.repository
             self._run_background(
-                repository.reconstruct_state,
+                repository.reconstruct_point_in_time,
                 (record.key, target),
-                lambda state: self._point_in_time_ready(generation, record, state),
+                lambda result: self._point_in_time_ready(generation, record, result),
                 lambda message: self._point_in_time_failed(generation, message),
             )
             return
         self._run_background(
-            reconstruct_entity_state,
+            reconstruct_point_in_time_with_enrichment,
             (record.key, self.families, target),
-            lambda state: self._point_in_time_ready(generation, record, state),
+            lambda result: self._point_in_time_ready(generation, record, result),
             lambda message: self._point_in_time_failed(generation, message),
         )
 
-    def _point_in_time_ready(self, generation: int, record, state):
+    def _point_in_time_ready(self, generation: int, record, result):
         if generation != self._pit_generation:
             return
-        self.point_in_time_page.apply_state(state, record)
+        self.point_in_time_page.apply_reconstruction(result, record)
 
     def _point_in_time_failed(self, generation: int, message: str):
         if generation != self._pit_generation:

@@ -136,6 +136,113 @@ class PointInTimeSourceDetails:
     family_coverage_labels: dict[str, str]
     auth_methods: ParsedAuthMethods | None = None
     family_source_info: dict[str, tuple[str, str]] = field(default_factory=dict)
+    managed_devices_audit: ManagedDevicesSourceAudit | None = None
+
+
+@dataclass(frozen=True)
+class DeviceFieldGroup:
+    group_id: str
+    title: str
+    fields: tuple[CardField, ...]
+
+
+@dataclass(frozen=True)
+class AutopilotPresentationModel:
+    status: str
+    display_label: str
+    fields: tuple[CardField, ...]
+    provenance: SourceProvenance | None
+    diagnostic: str
+    matching_keys: tuple[str, ...]
+    show_warning: bool
+    warning_message: str
+
+
+@dataclass(frozen=True)
+class ManagedDeviceCardModel:
+    stable_key: str
+    primary_label: str
+    secondary_label: str
+    tertiary_label: str
+    operating_system: str
+    compliance_label: str
+    ownership_label: str
+    management_groups: tuple[DeviceFieldGroup, ...]
+    provenance: SourceProvenance
+    autopilot: AutopilotPresentationModel | None
+    filter_blob: str
+
+
+ManagedDevicesSectionCoverage = Literal[
+    "populated",
+    "known_zero",
+    "no_coverage",
+    "ambiguous_association",
+    "unknown",
+    "enrichment_error",
+]
+
+
+@dataclass(frozen=True)
+class ManagedDevicesSectionModel:
+    coverage: ManagedDevicesSectionCoverage
+    device_count: int
+    devices: tuple[ManagedDeviceCardModel, ...]
+    message: str
+    warning_message: str | None
+    enrichment_error: str | None
+    unresolved_count: int
+    snapshot_at: datetime | None
+    source_relative_path: str
+    family_coverage_status: str | None
+
+
+@dataclass(frozen=True)
+class AutopilotSourceAudit:
+    status: str
+    snapshot_at: datetime | None
+    source_relative_path: str
+    matching_keys: tuple[str, ...]
+    normalized_values: dict[str, str]
+    diagnostic: str
+    candidate_counts: dict[str, int]
+    properties: tuple[SourcedProperty, ...]
+    provenance_observations: tuple[ProvenanceObservation, ...]
+
+
+@dataclass(frozen=True)
+class ManagedDeviceSourceAudit:
+    stable_key: str
+    link_kind: str
+    resolution_status: str
+    normalized_link_value: str
+    diagnostic: str
+    candidate_user_ids: tuple[str, ...]
+    managed_provenance_observations: tuple[ProvenanceObservation, ...]
+    properties: tuple[SourcedProperty, ...]
+    autopilot: AutopilotSourceAudit | None
+
+
+@dataclass(frozen=True)
+class ManagedDevicesSourceAudit:
+    coverage_status: str
+    snapshot_at: datetime | None
+    source_relative_path: str
+    source_family: str
+    resolved_device_count: int
+    unresolved_observation_count: int
+    enrichment_error: str | None
+    autopilot_snapshot_at: datetime | None
+    autopilot_source_relative_path: str
+    autopilot_coverage_status: str | None
+    devices: tuple[ManagedDeviceSourceAudit, ...]
+
+
+@dataclass(frozen=True)
+class PointInTimeReconstructionResult:
+    state: EntityState
+    enrichment: object | None = None
+    enrichment_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +256,7 @@ class PointInTimeCardModel:
     coverage_summary: str
     sections: tuple[CardSection, ...]
     source_details: PointInTimeSourceDetails
+    managed_devices: ManagedDevicesSectionModel | None = None
 
 
 def _coverage_by_family(state: EntityState) -> dict[str, FamilyCoverage]:
@@ -474,6 +582,8 @@ def build_point_in_time_card(
     *,
     display_name: str = "",
     history_range: tuple[datetime | None, datetime | None] = (None, None),
+    enrichment: object | None = None,
+    enrichment_error: str | None = None,
 ) -> PointInTimeCardModel:
     coverage_map = _coverage_by_family(state)
     fields_by_section = _build_scalar_fields(state, coverage_map)
@@ -522,7 +632,32 @@ def build_point_in_time_card(
             for item in state.coverage
             if item.source_relative_path or item.source_report_family
         },
+        managed_devices_audit=None,
     )
+
+    managed_devices_section: ManagedDevicesSectionModel | None = None
+    managed_devices_audit: ManagedDevicesSourceAudit | None = None
+    if state.key.entity_type == "user":
+        from diffasaurus.core.entity.pit_managed_devices_presentation import (
+            build_managed_devices_from_point_in_time_enrichment,
+        )
+
+        section, audit = build_managed_devices_from_point_in_time_enrichment(
+            enrichment,
+            enrichment_error=enrichment_error,
+        )
+        managed_devices_section = section
+        managed_devices_audit = audit
+        if audit is not None:
+            source_details = PointInTimeSourceDetails(
+                coverage=source_details.coverage,
+                scalar_properties_by_family=source_details.scalar_properties_by_family,
+                relationships_by_family=source_details.relationships_by_family,
+                family_coverage_labels=source_details.family_coverage_labels,
+                auth_methods=source_details.auth_methods,
+                family_source_info=source_details.family_source_info,
+                managed_devices_audit=audit,
+            )
 
     return PointInTimeCardModel(
         entity_type=state.key.entity_type,
@@ -534,4 +669,5 @@ def build_point_in_time_card(
         coverage_summary=_build_coverage_summary(state),
         sections=tuple(sections),
         source_details=source_details,
+        managed_devices=managed_devices_section,
     )

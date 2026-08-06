@@ -251,8 +251,18 @@ class EntityIdentityCardView(QWidget):
             empty.setStyleSheet(f"color: {PIT_COLORS['muted']};")
             self._layout.addWidget(empty)
 
+        managed_inserted = False
         for section in model.sections:
+            if section.section_id == "roles" and model.managed_devices is not None:
+                from diffasaurus.ui.point_in_time_device_card import ManagedDevicesSectionWidget
+
+                self._layout.addWidget(ManagedDevicesSectionWidget(model.managed_devices))
+                managed_inserted = True
             self._layout.addWidget(CardSectionWidget(section))
+        if model.managed_devices is not None and not managed_inserted:
+            from diffasaurus.ui.point_in_time_device_card import ManagedDevicesSectionWidget
+
+            self._layout.addWidget(ManagedDevicesSectionWidget(model.managed_devices))
         self._layout.addStretch()
 
     def collection_widget(self, collection_id: str) -> CardCollectionWidget | None:

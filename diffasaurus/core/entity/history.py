@@ -683,3 +683,27 @@ def enrich_user_managed_devices_with_autopilot(
         autopilot_snapshot_at=snapshot.captured_at,
         autopilot_source_relative_path=snapshot.path.name,
     )
+
+
+def reconstruct_point_in_time_with_enrichment(
+    entity_key: CanonicalEntityKey,
+    families: dict[str, list[ReportSnapshot]],
+    target: datetime,
+):
+    from diffasaurus.core.entity.pit_enrichment import UserPointInTimeEnrichment
+    from diffasaurus.core.entity.pit_presentation import PointInTimeReconstructionResult
+
+    state = reconstruct_entity_state(entity_key, families, target)
+    enrichment = None
+    error = None
+    if entity_key.entity_type == "user":
+        try:
+            managed = enrich_user_managed_devices_with_autopilot(entity_key, families, target)
+            enrichment = UserPointInTimeEnrichment(managed_devices=managed)
+        except Exception as exc:
+            error = str(exc)
+    return PointInTimeReconstructionResult(
+        state=state,
+        enrichment=enrichment,
+        enrichment_error=error,
+    )
