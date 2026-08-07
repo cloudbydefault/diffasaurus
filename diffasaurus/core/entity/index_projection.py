@@ -271,31 +271,34 @@ def replace_file_user_device_link_observations(
             "DELETE FROM user_device_link_observations WHERE file_id=?",
             (file_id,),
         )
-    for item in observations:
-        connection.execute(
-            """
-            INSERT INTO user_device_link_observations(
-                source_id, file_id, observed_at, device_entity_id, device_dedup_key,
-                link_kind, normalized_link_value, resolution_status,
-                resolved_user_immutable_id, candidate_user_ids_json, diagnostic,
-                raw_link_data_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                item.source_id,
-                item.file_id,
-                item.observed_at.isoformat(timespec="seconds"),
-                item.device_entity_id,
-                item.device_dedup_key,
-                item.link_kind,
-                item.normalized_link_value,
-                item.resolution_status,
-                item.resolved_user_immutable_id,
-                json.dumps(sorted(item.candidate_user_ids), separators=(",", ":")),
-                item.diagnostic,
-                item.raw_link_data_json,
-            ),
+    rows = [
+        (
+            item.source_id,
+            item.file_id,
+            item.observed_at.isoformat(timespec="seconds"),
+            item.device_entity_id,
+            item.device_dedup_key,
+            item.link_kind,
+            item.normalized_link_value,
+            item.resolution_status,
+            item.resolved_user_immutable_id,
+            json.dumps(sorted(item.candidate_user_ids), separators=(",", ":")),
+            item.diagnostic,
+            item.raw_link_data_json,
         )
+        for item in observations
+    ]
+    connection.executemany(
+        """
+        INSERT INTO user_device_link_observations(
+            source_id, file_id, observed_at, device_entity_id, device_dedup_key,
+            link_kind, normalized_link_value, resolution_status,
+            resolved_user_immutable_id, candidate_user_ids_json, diagnostic,
+            raw_link_data_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
 
 
 def build_user_device_link_projection(
@@ -316,7 +319,7 @@ def build_user_device_link_projection(
     from diffasaurus.core.entity.index_schema import ensure_user_device_link_schema
     from diffasaurus.core.entity.index_sync import (
         _ensure_entity_id,
-        _load_alias_index_from_db,
+        _load_full_alias_index_from_db,
     )
     from diffasaurus.core.entity.pit_enrichment import MANAGED_DEVICES_FAMILY
     from diffasaurus.core.entity.user_device_links import (
@@ -348,6 +351,8 @@ def build_user_device_link_projection(
     ).fetchall()
 
     all_observations = []
+    alias_index = _load_full_alias_index_from_db(connection, source_id)
+    entity_id_cache: dict[tuple[str, str], int] = {}
     for file_row in files:
         file_id = int(file_row["id"])
         captured_at = datetime_from_iso(file_row["captured_at"])
@@ -355,11 +360,16 @@ def build_user_device_link_projection(
         if not path.is_file():
             continue
         _, rows = read_csv_rows(path)
-        alias_index = _load_alias_index_from_db(connection, source_id, captured_at)
         grouped = group_managed_device_rows(rows, captured_at, alias_index)
 
         def _entity_id_for_key(key, _source_id=source_id):
-            return _ensure_entity_id(connection, _source_id, key, key.primary_id)
+            return _ensure_entity_id(
+                connection,
+                _source_id,
+                key,
+                key.primary_id,
+                entity_id_cache=entity_id_cache,
+            )
 
         observations = build_observation_records(
             source_id=source_id,
