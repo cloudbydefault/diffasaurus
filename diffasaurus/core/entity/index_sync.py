@@ -164,6 +164,31 @@ def _load_alias_index_from_db(
     return index
 
 
+def _load_full_alias_index_from_db(
+    connection: sqlite3.Connection,
+    source_id: int,
+) -> AliasBindingIndex:
+    index = AliasBindingIndex()
+    rows = connection.execute(
+        """
+        SELECT kind, normalized_value, observed_at, immutable_id, source_family
+        FROM alias_observations
+        WHERE source_id=?
+        ORDER BY observed_at
+        """,
+        (source_id,),
+    ).fetchall()
+    for row in rows:
+        index.record(
+            row["kind"],
+            row["normalized_value"],
+            datetime.fromisoformat(row["observed_at"]),
+            row["immutable_id"],
+            row["source_family"],
+        )
+    return index
+
+
 def _build_occurrence_drafts(
     adapter: ReportFamilyAdapter,
     rows: list[dict[str, str]],
@@ -480,7 +505,11 @@ def _ensure_entity_id(
     source_id: int,
     key: CanonicalEntityKey,
     display_name: str,
+    entity_id_cache: dict[tuple[str, str], int] | None = None,
 ) -> int:
+    cache_key = (key.entity_type, key.primary_id)
+    if entity_id_cache is not None and cache_key in entity_id_cache:
+        return entity_id_cache[cache_key]
     row = connection.execute(
         """
         SELECT id FROM entities
@@ -489,15 +518,19 @@ def _ensure_entity_id(
         (source_id, key.entity_type, key.primary_id),
     ).fetchone()
     if row is not None:
-        return int(row["id"])
-    cursor = connection.execute(
-        """
-        INSERT INTO entities(source_id, entity_type, primary_id, display_name)
-        VALUES (?, ?, ?, ?)
-        """,
-        (source_id, key.entity_type, key.primary_id, display_name),
-    )
-    return int(cursor.lastrowid)
+        entity_id = int(row["id"])
+    else:
+        cursor = connection.execute(
+            """
+            INSERT INTO entities(source_id, entity_type, primary_id, display_name)
+            VALUES (?, ?, ?, ?)
+            """,
+            (source_id, key.entity_type, key.primary_id, display_name),
+        )
+        entity_id = int(cursor.lastrowid)
+    if entity_id_cache is not None:
+        entity_id_cache[cache_key] = entity_id
+    return entity_id
 
 
 def _index_supported_file(
@@ -508,6 +541,9 @@ def _index_supported_file(
     adapter_version: str,
     affected_entity_ids: set[int],
     stats: SyncStats,
+    *,
+    shared_alias_index: AliasBindingIndex | None = None,
+    entity_id_cache: dict[tuple[str, str], int] | None = None,
 ) -> None:
     adapter = ADAPTERS_BY_FAMILY[item.family]
     assert adapter is not None
@@ -520,7 +556,10 @@ def _index_supported_file(
         raise ValueError(
             f"Missing required columns {required} for {adapter.family} in {item.relative_path}"
         )
-    alias_index = _load_alias_index_from_db(connection, source_id, item.captured_at)
+    if shared_alias_index is not None and not record_bindings:
+        alias_index = shared_alias_index
+    else:
+        alias_index = _load_alias_index_from_db(connection, source_id, item.captured_at)
     drafts, unresolved = _build_occurrence_drafts(
         adapter,
         rows,
@@ -530,6 +569,7 @@ def _index_supported_file(
     )
     stats.unresolved += unresolved
     entity_ids: set[int] = set()
+    observed_at_text = item.captured_at.isoformat(timespec="seconds")
     with transaction(connection):
         connection.execute(
             "DELETE FROM alias_observations WHERE file_id=?", (file_id,)
@@ -540,9 +580,15 @@ def _index_supported_file(
         connection.execute(
             "DELETE FROM entity_occurrences WHERE file_id=?", (file_id,)
         )
+        occurrence_rows: list[tuple] = []
+        alias_rows: list[tuple] = []
         for draft in drafts.values():
             entity_id = _ensure_entity_id(
-                connection, source_id, draft.key, draft.display_name
+                connection,
+                source_id,
+                draft.key,
+                draft.display_name,
+                entity_id_cache=entity_id_cache,
             )
             entity_ids.add(entity_id)
             scalar_json = canonical_json(draft.scalar_properties)
@@ -552,23 +598,27 @@ def _index_supported_file(
                 {"scalar": draft.scalar_properties, "relationships": draft.relationships},
                 draft.aliases,
             )
-            connection.execute(
+            occurrence_rows.append(
+                (
+                    entity_id,
+                    file_id,
+                    observed_at_text,
+                    draft.display_name,
+                    scalar_json,
+                    relationships_json,
+                    aliases_json,
+                    row_hash,
+                )
+            )
+        if occurrence_rows:
+            connection.executemany(
                 """
                 INSERT INTO entity_occurrences(
                     entity_id, file_id, observed_at, display_name,
                     scalar_properties_json, relationships_json, aliases_json, row_hash
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    entity_id,
-                    file_id,
-                    item.captured_at.isoformat(timespec="seconds"),
-                    draft.display_name,
-                    scalar_json,
-                    relationships_json,
-                    aliases_json,
-                    row_hash,
-                ),
+                occurrence_rows,
             )
         if record_bindings:
             for draft in drafts.values():
@@ -578,23 +628,27 @@ def _index_supported_file(
                         continue
                     kind = alias["kind"]
                     value = alias["value"]
-                    connection.execute(
-                            """
-                            INSERT INTO alias_observations(
-                                source_id, file_id, kind, normalized_value,
-                                immutable_id, observed_at, source_family
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                source_id,
-                                file_id,
-                                kind,
-                                value.lower(),
-                                user_id,
-                                item.captured_at.isoformat(timespec="seconds"),
-                                adapter.family,
-                            ),
+                    alias_rows.append(
+                        (
+                            source_id,
+                            file_id,
+                            kind,
+                            value.lower(),
+                            user_id,
+                            observed_at_text,
+                            adapter.family,
                         )
+                    )
+            if alias_rows:
+                connection.executemany(
+                    """
+                    INSERT INTO alias_observations(
+                        source_id, file_id, kind, normalized_value,
+                        immutable_id, observed_at, source_family
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    alias_rows,
+                )
         connection.execute(
             """
             UPDATE indexed_files
@@ -878,11 +932,13 @@ def run_sync(
                 readonly=False,
                 adapter_version=adapter_version,
                 journal_mode="DELETE" if cold else "wal",
+                cold_build=cold,
             )
             affected_entity_ids: set[int] = set()
             affected_families: set[str] = set()
             run_id: int | None = None
             indexed_successfully = 0
+            entity_id_cache: dict[tuple[str, str], int] = {}
 
             try:
                 source_id = _ensure_source(connection, reports_dir)
@@ -990,10 +1046,9 @@ def run_sync(
                 other_batch = [
                     pair for pair in to_index if pair[1].family not in _BINDING_FAMILIES
                 ]
-                ordered = binding_batch + other_batch
 
                 emit("indexing", "Indexing changed files")
-                for file_id, item in ordered:
+                for file_id, item in binding_batch:
                     _check_cancelled(cancelled)
                     try:
                         previous_entities = {
@@ -1011,6 +1066,44 @@ def run_sync(
                             compute_family_adapter_version(item.family),
                             affected_entity_ids,
                             stats,
+                            entity_id_cache=entity_id_cache,
+                        )
+                        stats.parsed += 1
+                        indexed_successfully += 1
+                        affected_families.add(item.family)
+                        affected_entity_ids.update(previous_entities)
+                    except Exception as exc:
+                        stats.failed += 1
+                        logger.exception("Failed to index %s", item.relative_path)
+                        _record_file_failure(connection, run_id, file_id, item, str(exc))
+                    emit("indexing", item.path.name)
+
+                shared_alias_index: AliasBindingIndex | None = None
+                if other_batch:
+                    shared_alias_index = _load_full_alias_index_from_db(
+                        connection, source_id
+                    )
+
+                for file_id, item in other_batch:
+                    _check_cancelled(cancelled)
+                    try:
+                        previous_entities = {
+                            int(row["entity_id"])
+                            for row in connection.execute(
+                                "SELECT entity_id FROM entity_occurrences WHERE file_id=?",
+                                (file_id,),
+                            ).fetchall()
+                        }
+                        _index_supported_file(
+                            connection,
+                            source_id,
+                            file_id,
+                            item,
+                            compute_family_adapter_version(item.family),
+                            affected_entity_ids,
+                            stats,
+                            shared_alias_index=shared_alias_index,
+                            entity_id_cache=entity_id_cache,
                         )
                         stats.parsed += 1
                         indexed_successfully += 1

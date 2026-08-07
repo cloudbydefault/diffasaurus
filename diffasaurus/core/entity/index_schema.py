@@ -149,6 +149,17 @@ CREATE INDEX IF NOT EXISTS idx_occurrences_file
     ON entity_occurrences(file_id);
 """
 
+_PERFORMANCE_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_alias_obs_source_observed
+    ON alias_observations(source_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_alias_obs_source_immutable_observed
+    ON alias_observations(source_id, immutable_id, observed_at);
+"""
+
+
+def ensure_performance_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(_PERFORMANCE_INDEX_DDL)
+
 _USER_DEVICE_LINK_DDL = """
 CREATE TABLE IF NOT EXISTS user_device_link_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +228,7 @@ def ensure_user_device_link_schema(connection: sqlite3.Connection) -> None:
 
 def initialize_schema(connection: sqlite3.Connection, adapter_version: str) -> bool:
     connection.executescript(_DDL)
+    ensure_performance_indexes(connection)
     ensure_user_device_link_schema(connection)
     fts5_available = probe_fts5(connection)
     if fts5_available:
@@ -253,9 +265,11 @@ def migrate_schema_if_needed(connection: sqlite3.Connection, adapter_version: st
         return
     stored_version = int(row["value"] if isinstance(row, sqlite3.Row) else row[0])
     if stored_version == SCHEMA_VERSION:
+        ensure_performance_indexes(connection)
         ensure_user_device_link_schema(connection)
         return
     if stored_version == 1 and SCHEMA_VERSION == 2:
+        ensure_performance_indexes(connection)
         ensure_user_device_link_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -272,6 +286,7 @@ def open_connection(
     readonly: bool = False,
     adapter_version: str | None = None,
     journal_mode: str = "wal",
+    cold_build: bool = False,
 ) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if readonly and db_path.is_file():
@@ -282,8 +297,13 @@ def open_connection(
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=5000")
     if not readonly:
-        connection.execute(f"PRAGMA journal_mode={journal_mode}")
-        connection.execute("PRAGMA synchronous=NORMAL")
+        if cold_build:
+            connection.execute("PRAGMA journal_mode=MEMORY")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA temp_store=MEMORY")
+        else:
+            connection.execute(f"PRAGMA journal_mode={journal_mode}")
+            connection.execute("PRAGMA synchronous=NORMAL")
         if adapter_version is not None:
             migrate_schema_if_needed(connection, adapter_version)
     return connection
