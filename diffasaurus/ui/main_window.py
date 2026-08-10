@@ -1184,7 +1184,7 @@ class DiffasaurusWindow(QMainWindow):
             self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
         self.snapshot_explorer.set_snapshots(snapshots)
-        if self.stack.currentIndex() == 6:
+        if self.stack.currentIndex() == 7:
             self.snapshot_explorer.activate()
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
@@ -1391,7 +1391,7 @@ class DiffasaurusWindow(QMainWindow):
         snapshot = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(snapshot, ReportSnapshot):
             return
-        self.show_page(6)
+        self.show_page(7)
         self.snapshot_explorer.select_snapshot(snapshot)
 
     def filter_library(self):
