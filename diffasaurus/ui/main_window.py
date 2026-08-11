@@ -1722,7 +1722,7 @@ class DiffasaurusWindow(QMainWindow):
         generation = self._recent_detail_generation
         self._run_background(
             compare_snapshots,
-            (baseline, latest, key_column),
+            (baseline, latest, key_column, family),
             lambda summary: self._recent_detail_ready(generation, family, summary),
             lambda message: self._recent_detail_failed(generation, family, message),
         )

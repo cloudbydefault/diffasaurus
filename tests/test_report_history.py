@@ -16,9 +16,11 @@ from diffasaurus.core.report_history import (
     aggregate_recent_changes,
     analyze_snapshot,
     compare_snapshots,
+    detail_identity,
     expected_business_days,
     family_change_status,
     filter_history_by_days,
+    identity_display_column,
     metric_series,
     report_family,
     report_run_health,
@@ -562,6 +564,240 @@ class RecentChangesUiConsistencyTests(unittest.TestCase):
             self.assertIn("Latest:", section.coverage_label.text())
             self.assertFalse(section.reason_label.isVisible())
             self.assertEqual(status.status, "changed")
+
+
+class EntraGroupsIdentityDisplayTests(unittest.TestCase):
+    FAMILY = "Entra_Groups_Dependencies"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        write_report(
+            root / "Entra_Groups_Dependencies_20260731-042100.csv",
+            baseline_rows,
+        )
+        write_report(
+            root / "Entra_Groups_Dependencies_20260804-042100.csv",
+            latest_rows,
+        )
+        snapshots = scan_report_history(root)[self.FAMILY]
+        self.assertEqual(suggested_key(snapshots[0].headers), "GroupId")
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(baseline, latest, "GroupId", self.FAMILY)
+
+    def test_group_comparison_keys_rows_by_group_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    {"GroupId": "id-1", "DisplayName": "Finance Users"},
+                    {"GroupId": "id-2", "DisplayName": "Developers"},
+                ],
+                [
+                    {"GroupId": "id-1", "DisplayName": "Finance Employees"},
+                    {"GroupId": "id-3", "DisplayName": "Application Access"},
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (1, 1, 1))
+            keys = {detail["key"] for detail in result.details}
+            self.assertEqual(keys, {"id-1", "id-2", "id-3"})
+
+    def test_added_group_displays_latest_display_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "id-1", "DisplayName": "Finance Users"}],
+                [
+                    {"GroupId": "id-1", "DisplayName": "Finance Users"},
+                    {"GroupId": "id-2", "DisplayName": "Developers"},
+                ],
+            )
+            added = next(
+                detail for detail in self._compare(baseline, latest).details
+                if detail["change"] == "Added"
+            )
+            self.assertEqual(added["key"], "id-2")
+            self.assertEqual(detail_identity(added), "Developers")
+
+    def test_removed_group_displays_baseline_display_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    {"GroupId": "id-1", "DisplayName": "Finance Users"},
+                    {"GroupId": "id-2", "DisplayName": "Developers"},
+                ],
+                [{"GroupId": "id-1", "DisplayName": "Finance Users"}],
+            )
+            removed = next(
+                detail for detail in self._compare(baseline, latest).details
+                if detail["change"] == "Removed"
+            )
+            self.assertEqual(removed["key"], "id-2")
+            self.assertEqual(detail_identity(removed), "Developers")
+
+    def test_changed_group_displays_latest_display_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "id-1", "DisplayName": "Finance Users"}],
+                [{"GroupId": "id-1", "DisplayName": "Finance Employees"}],
+            )
+            changed = next(
+                detail for detail in self._compare(baseline, latest).details
+                if detail["change"] == "Changed"
+            )
+            self.assertEqual(changed["key"], "id-1")
+            self.assertEqual(changed["column"], "DisplayName")
+            self.assertEqual(detail_identity(changed), "Finance Employees")
+
+    def test_missing_display_name_falls_back_to_group_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "id-1", "DisplayName": ""}],
+                [{"GroupId": "id-2", "DisplayName": ""}],
+            )
+            result = self._compare(baseline, latest)
+            for detail in result.details:
+                self.assertEqual(detail_identity(detail), detail["key"])
+
+    def test_group_rename_remains_single_changed_entity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "abc-123", "DisplayName": "Finance Users"}],
+                [{"GroupId": "abc-123", "DisplayName": "Finance Employees"}],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["key"], "abc-123")
+            self.assertEqual(detail_identity(changed), "Finance Employees")
+            self.assertEqual(changed["column"], "DisplayName")
+            self.assertEqual(changed["before"], "Finance Users")
+            self.assertEqual(changed["after"], "Finance Employees")
+
+    def test_duplicate_display_names_remain_independent_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    {"GroupId": "id-1", "DisplayName": "Test Group"},
+                    {"GroupId": "id-2", "DisplayName": "Test Group"},
+                ],
+                [
+                    {"GroupId": "id-1", "DisplayName": "Test Group"},
+                    {"GroupId": "id-2", "DisplayName": "Test Group Renamed"},
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["key"], "id-2")
+            self.assertEqual(detail_identity(changed), "Test Group Renamed")
+
+    def test_compare_without_family_omits_identity_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "id-1", "DisplayName": "Finance Users"}],
+                [{"GroupId": "id-2", "DisplayName": "Developers"}],
+            )
+            result = compare_snapshots(baseline, latest, "GroupId")
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertNotIn("identity", added)
+            self.assertEqual(detail_identity(added), "id-2")
+
+    def test_non_group_family_identity_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "DisplayName": "Ada"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [
+                    {"UPN": "ada@example.com", "DisplayName": "Ada"},
+                    {"UPN": "linus@example.com", "DisplayName": "Linus"},
+                ],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                "UPN",
+                "Entra_Users_Properties",
+            )
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertNotIn("identity", added)
+            self.assertEqual(detail_identity(added), "linus@example.com")
+
+    def test_recent_changes_search_matches_display_name_and_group_id(self):
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [{"GroupId": "id-1", "DisplayName": "Finance Users"}],
+                [
+                    {"GroupId": "id-1", "DisplayName": "Finance Employees"},
+                    {"GroupId": "id-2", "DisplayName": "Developers"},
+                ],
+            )
+            summary = self._compare(baseline, latest)
+            section = FamilyChangeSection()
+            section._details = summary
+            section._filter = "All"
+
+            section.detail_search.setText("Developers")
+            section._apply_detail_filters()
+            self.assertEqual(section.detail_table.rowCount(), 1)
+            self.assertEqual(
+                section.detail_table.item(0, 1).text(),
+                "Developers",
+            )
+
+            section.detail_search.setText("Finance Employees")
+            section._apply_detail_filters()
+            self.assertEqual(section.detail_table.rowCount(), 1)
+            self.assertEqual(
+                section.detail_table.item(0, 1).text(),
+                "Finance Employees",
+            )
+
+            section.detail_search.setText("id-1")
+            section._apply_detail_filters()
+            self.assertEqual(section.detail_table.rowCount(), 1)
+
+            section.detail_search.setText("id-2")
+            section._apply_detail_filters()
+            self.assertEqual(section.detail_table.rowCount(), 1)
+            self.assertEqual(
+                section.detail_table.item(0, 1).text(),
+                "Developers",
+            )
+            section.close()
+
+    def test_identity_display_column_mapping(self):
+        headers = ("GroupId", "DisplayName", "MailEnabled")
+        self.assertEqual(
+            identity_display_column(self.FAMILY, headers),
+            "DisplayName",
+        )
+        self.assertEqual(
+            identity_display_column("Entra_Users_Properties", headers),
+            "",
+        )
 
 
 class StandaloneHistoryTests(unittest.TestCase):

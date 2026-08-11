@@ -46,6 +46,10 @@ PREFERRED_KEYS = (
     "AccessPackageId",
 )
 
+FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
+    "Entra_Groups_Dependencies": ("DisplayName",),
+}
+
 _ANALYSIS_CACHE: dict[
     tuple[str, str, str, int, int],
     tuple["ReportSnapshot", str, dict[str, float]],
@@ -339,11 +343,50 @@ def suggested_key(headers: list[str] | tuple[str, ...]) -> str:
     return headers[0] if headers else ""
 
 
+def identity_display_column(
+    family: str | None,
+    headers: list[str] | tuple[str, ...],
+) -> str:
+    if not family:
+        return ""
+    candidates = FAMILY_IDENTITY_DISPLAY.get(family, ())
+    normalized = {header.lower(): header for header in headers}
+    for candidate in candidates:
+        if candidate.lower() in normalized:
+            return normalized[candidate.lower()]
+    return ""
+
+
+def detail_identity(detail: dict[str, str]) -> str:
+    return detail.get("identity") or detail.get("key", "")
+
+
+def _identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+    display_column: str,
+) -> str:
+    before_row = before_map.get(key, {})
+    after_row = after_map.get(key, {})
+    if change == "Added":
+        display = str(after_row.get(display_column, "") or "").strip()
+    elif change == "Removed":
+        display = str(before_row.get(display_column, "") or "").strip()
+    else:
+        display = str(after_row.get(display_column, "") or "").strip()
+        if not display:
+            display = str(before_row.get(display_column, "") or "").strip()
+    return display or key
+
+
 def _compare_snapshots(
     baseline: ReportSnapshot,
     latest: ReportSnapshot,
     key_column: str,
     include_details: bool,
+    family: str | None = None,
 ) -> ComparisonSummary:
     common = common_headers(baseline, latest)
     if not key_column or key_column not in common:
@@ -395,16 +438,35 @@ def _compare_snapshots(
     removed_keys = sorted(before_keys - after_keys, key=str.lower)
     shared_keys = sorted(before_keys & after_keys, key=str.lower)
     details: list[dict[str, str]] = []
+    display_column = identity_display_column(family, common) if include_details else ""
 
     if include_details:
         for key in added_keys:
-            details.append(
-                {"change": "Added", "key": key, "column": "", "before": "", "after": "New row"}
-            )
+            detail = {
+                "change": "Added",
+                "key": key,
+                "column": "",
+                "before": "",
+                "after": "New row",
+            }
+            if display_column:
+                detail["identity"] = _identity_label(
+                    key, "Added", before_map, after_map, display_column
+                )
+            details.append(detail)
         for key in removed_keys:
-            details.append(
-                {"change": "Removed", "key": key, "column": "", "before": "Existing row", "after": ""}
-            )
+            detail = {
+                "change": "Removed",
+                "key": key,
+                "column": "",
+                "before": "Existing row",
+                "after": "",
+            }
+            if display_column:
+                detail["identity"] = _identity_label(
+                    key, "Removed", before_map, after_map, display_column
+                )
+            details.append(detail)
 
     changed_rows = 0
     for key in shared_keys:
@@ -417,15 +479,18 @@ def _compare_snapshots(
             if before_value != after_value:
                 row_changed = True
                 if include_details:
-                    details.append(
-                        {
-                            "change": "Changed",
-                            "key": key,
-                            "column": column,
-                            "before": before_value,
-                            "after": after_value,
-                        }
-                    )
+                    detail = {
+                        "change": "Changed",
+                        "key": key,
+                        "column": column,
+                        "before": before_value,
+                        "after": after_value,
+                    }
+                    if display_column:
+                        detail["identity"] = _identity_label(
+                            key, "Changed", before_map, after_map, display_column
+                        )
+                    details.append(detail)
         changed_rows += int(row_changed)
 
     summary = ComparisonSummary(
@@ -462,8 +527,15 @@ def compare_snapshots(
     baseline: ReportSnapshot,
     latest: ReportSnapshot,
     key_column: str,
+    family: str | None = None,
 ) -> ComparisonSummary:
-    return _compare_snapshots(baseline, latest, key_column, include_details=True)
+    return _compare_snapshots(
+        baseline,
+        latest,
+        key_column,
+        include_details=True,
+        family=family,
+    )
 
 
 def compare_snapshot_counts(
@@ -985,7 +1057,7 @@ def family_change_status(
 
     try:
         if include_details:
-            summary = compare_snapshots(baseline, latest, key_column)
+            summary = compare_snapshots(baseline, latest, key_column, family)
         else:
             summary = compare_snapshot_counts(baseline, latest, key_column)
     except Exception:
