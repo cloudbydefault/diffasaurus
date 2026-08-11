@@ -25,6 +25,7 @@ from diffasaurus.core.report_history import (
     FamilyChangeStatus,
     RecentChangesReport,
     ReportSnapshot,
+    detail_identity,
 )
 from diffasaurus.ui.period_selector import PeriodSelector
 from diffasaurus.ui.report_runner import family_display_name
@@ -296,15 +297,18 @@ class FamilyChangeSection(QFrame):
         self.detail_table.setUpdatesEnabled(False)
         self.detail_table.setRowCount(len(matching))
         for row, detail in enumerate(matching):
+            identity = detail_identity(detail)
             values = (
                 detail["change"],
-                detail["key"],
+                identity,
                 detail["column"],
                 detail["before"],
                 detail["after"],
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                if column == 1 and identity != detail["key"]:
+                    item.setToolTip(detail["key"])
                 if column == 0:
                     item.setForeground(
                         QColor(
