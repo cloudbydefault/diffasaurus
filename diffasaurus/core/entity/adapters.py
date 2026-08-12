@@ -113,6 +113,13 @@ def _managed_device_fallback(row: dict[str, str], family: str) -> str | None:
     return None
 
 
+def _android_device_fallback(row: dict[str, str], family: str) -> str | None:
+    value = _row_value(row, "IntuneDeviceId")
+    if value:
+        return f"android_intune:{value}"
+    return None
+
+
 def _ios_device_fallback(row: dict[str, str], family: str) -> str | None:
     value = _row_value(row, "IntuneDeviceId")
     if value:
@@ -374,6 +381,63 @@ DEVICE_IOS = ReportFamilyAdapter(
     fallback_key=_ios_device_fallback,
 )
 
+ANDROID_CARD_COLUMNS = (
+    "DeviceName",
+    "ManagementName",
+    "IntuneDeviceId",
+    "EntraDeviceId",
+    "SerialNumber",
+    "Manufacturer",
+    "Model",
+    "OperatingSystem",
+    "OSVersion",
+    "AndroidSecurityPatchLevel",
+    "UserDisplayName",
+    "UserPrincipalName",
+    "EmailAddress",
+    "PhoneNumber",
+    "IMEI",
+    "MEID",
+    "ICCID",
+    "SubscriberCarrier",
+    "WiFiMacAddress",
+    "OwnerType",
+    "ManagementAgent",
+    "DeviceEnrollmentType",
+    "EnrollmentProfileName",
+    "DeviceRegistrationState",
+    "EnrolledDateTime",
+    "ManagementCertificateExpiration",
+    "LastSyncDateTime",
+    "DaysSinceLastSync",
+    "DeviceActivityStatus",
+    "ComplianceState",
+    "ComplianceGracePeriodExpiration",
+    "AzureADRegistered",
+    "IsEncrypted",
+    "Rooted",
+    "PartnerReportedThreatState",
+    "EASActivated",
+    "EASDeviceId",
+    "EASActivationDateTime",
+    "TotalStorageGB",
+    "FreeStorageGB",
+)
+
+DEVICE_ANDROID = ReportFamilyAdapter(
+    family="Intune_Android_Devices",
+    entity_type="device",
+    canonical_columns=("EntraDeviceId",),
+    alias_columns=(
+        AliasColumn("serial_number", "SerialNumber"),
+        AliasColumn("device_name", "DeviceName"),
+        AliasColumn("intune_device_id", "IntuneDeviceId"),
+    ),
+    display_name_column="DeviceName",
+    card_columns=ANDROID_CARD_COLUMNS,
+    fallback_key=_android_device_fallback,
+)
+
 MAILBOX_SHARED = ReportFamilyAdapter(
     family="Exchange_SharedMailboxes",
     entity_type="shared_mailbox",
@@ -408,5 +472,6 @@ ALL_ADAPTERS: tuple[ReportFamilyAdapter, ...] = (
     DEVICE_MANAGED,
     DEVICE_AUTOPILOT,
     DEVICE_IOS,
+    DEVICE_ANDROID,
     MAILBOX_SHARED,
 )

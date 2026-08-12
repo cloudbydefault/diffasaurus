@@ -81,6 +81,10 @@ REPORT_CATALOG = {
     "_app_INTUNE_iOS_Devices.ps1": (
         "📱", "INTUNE · iOS devices", "iPhone and iPad posture", "Intune_iOS_Devices"
     ),
+    "_app_INTUNE_Android_Devices.ps1": (
+        "📱", "INTUNE · Android devices", "Android inventory and security posture",
+        "Intune_Android_Devices",
+    ),
     "app_EXCHANGE_SharedMailboxes_Report.ps1": (
         "📬", "EXCHANGE · Shared mailboxes", "Permissions and activity",
         "Exchange_SharedMailboxes",

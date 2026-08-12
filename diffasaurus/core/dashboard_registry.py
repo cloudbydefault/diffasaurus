@@ -14,6 +14,10 @@ from diffasaurus.core.dashboard_builders.intune_ios_devices_builder import (
     looks_like_intune_ios_devices_report,
     build_intune_ios_devices_stats,
 )
+from diffasaurus.core.dashboard_builders.intune_android_devices_builder import (
+    looks_like_intune_android_devices_report,
+    build_intune_android_devices_stats,
+)
 from diffasaurus.core.dashboard_builders.devices_builder import (
     looks_like_devices_report,
     build_devices_stats,
@@ -87,6 +91,11 @@ DASHBOARD_BUILDERS = [
         "title": "Autopilot Devices Dashboard",
         "detector": looks_like_autopilot_devices_report,
         "builder": build_autopilot_devices_stats,
+    },
+    {
+        "title": "Intune Android Devices",
+        "detector": looks_like_intune_android_devices_report,
+        "builder": build_intune_android_devices_stats,
     },
     {
         "title": "Intune iOS Devices",

@@ -40,15 +40,43 @@ PREFERRED_KEYS = (
     "Id",
     "DeviceId",
     "AzureADDeviceId",
+    "EntraDeviceId",
+    "IntuneDeviceId",
     "SerialNumber",
     "PrimarySmtpAddress",
     "GroupId",
     "AccessPackageId",
 )
 
+FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
+    "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
+    "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
+}
+
 FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
     "Entra_Groups_Dependencies": ("DisplayName",),
+    "Intune_Android_Devices": (
+        "DeviceName",
+        "SerialNumber",
+        "EntraDeviceId",
+        "IntuneDeviceId",
+    ),
+    "Intune_iOS_Devices": (
+        "DeviceName",
+        "SerialNumber",
+        "EntraDeviceId",
+        "IntuneDeviceId",
+    ),
 }
+
+_DEVICE_COMPARISON_FAMILIES = frozenset(
+    {
+        "Intune_Android_Devices",
+        "Intune_iOS_Devices",
+        "Intune_ManagedDevices_Compliance",
+        "Intune_Devices_Autopilot",
+    }
+)
 
 COMPOSITE_KEY_DELIMITER = "\x1f"
 
@@ -360,7 +388,12 @@ def suggested_key(
     if composite_label:
         return composite_label
     normalized = {header.lower(): header for header in headers}
-    for candidate in PREFERRED_KEYS:
+    preferred = (
+        FAMILY_PREFERRED_KEYS[family]
+        if family and family in FAMILY_PREFERRED_KEYS
+        else PREFERRED_KEYS
+    )
+    for candidate in preferred:
         if candidate.lower() in normalized:
             return normalized[candidate.lower()]
     return headers[0] if headers else ""
@@ -435,6 +468,8 @@ def detail_identity(detail: dict[str, str]) -> str:
 def comparison_summary_unit(family: str | None) -> str:
     if family == "Entra_Group_User_Memberships":
         return "memberships"
+    if family in _DEVICE_COMPARISON_FAMILIES:
+        return "devices"
     return "rows"
 
 
@@ -547,7 +582,20 @@ def _attach_detail_identity(
             if value:
                 detail[field] = value
         return
-    if display_column:
+    identity_columns = FAMILY_IDENTITY_DISPLAY.get(family or "", ())
+    if identity_columns:
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        detail["identity"] = (
+            _pick_identity_label(primary_row, fallback_row, identity_columns) or key
+        )
+    elif display_column:
         detail["identity"] = _identity_label(
             key,
             change,
