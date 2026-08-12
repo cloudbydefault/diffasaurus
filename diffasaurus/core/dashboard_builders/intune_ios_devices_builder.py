@@ -16,6 +16,16 @@ def looks_like_intune_ios_devices_report(headers: list[str]) -> bool:
         "compliancestate",
     }
 
+    android_markers = {
+        "androidsecuritypatchlevel",
+        "rooted",
+        "partnerreportedthreatstate",
+        "deviceregistrationstate",
+    }
+
+    if len(normalized.intersection(android_markers)) >= 1:
+        return False
+
     return (
         required.issubset(normalized)
         and len(normalized.intersection(ios_specific)) >= 2

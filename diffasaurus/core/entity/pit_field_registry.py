@@ -188,28 +188,80 @@ def _build_property_bindings() -> dict[PropertyBindingKey, NormalizedFieldSpec]:
     add("device", "Intune_ManagedDevices_Compliance", "AzureADDeviceId", _spec("device_entra_id", "Entra device ID", "device", "Intune_ManagedDevices_Compliance", device_identity))
     add("device", "Intune_Devices_Autopilot", "AzureADDeviceId", _spec("device_entra_id", "Entra device ID", "device", "Intune_Devices_Autopilot", device_identity))
     add("device", "Intune_iOS_Devices", "EntraDeviceId", _spec("device_entra_id", "Entra device ID", "device", "Intune_iOS_Devices", device_identity))
+    add("device", "Intune_Android_Devices", "EntraDeviceId", _spec("device_entra_id", "Entra device ID", "device", "Intune_Android_Devices", device_identity))
 
     add("device", "Intune_ManagedDevices_Compliance", "ManagedDeviceId", _spec("device_managed_id", "Managed device ID", "device", "Intune_ManagedDevices_Compliance", device_identity))
     add("device", "Intune_iOS_Devices", "IntuneDeviceId", _spec("intune_device_id", "Intune device ID", "device", "Intune_iOS_Devices", device_mgmt))
+    add("device", "Intune_Android_Devices", "IntuneDeviceId", _spec("intune_device_id", "Intune device ID", "device", "Intune_Android_Devices", device_mgmt))
 
     for family, col in (
         ("Intune_ManagedDevices_Compliance", "DeviceName"),
         ("Intune_iOS_Devices", "DeviceName"),
+        ("Intune_Android_Devices", "DeviceName"),
         ("Intune_Devices_Autopilot", "DisplayName"),
     ):
         add("device", family, col, _spec("device_name", "Device name", "device", family, device_identity))
 
-    for family in ("Intune_ManagedDevices_Compliance", "Intune_Devices_Autopilot", "Intune_iOS_Devices"):
+    for family in (
+        "Intune_ManagedDevices_Compliance",
+        "Intune_Devices_Autopilot",
+        "Intune_iOS_Devices",
+        "Intune_Android_Devices",
+    ):
         add("device", family, "SerialNumber", _spec("serial_number", "Serial number", "device", family, "ownership"))
+
+    for family in ("Intune_iOS_Devices", "Intune_Android_Devices"):
+        add("device", family, "Manufacturer", _spec("manufacturer", "Manufacturer", "device", family, device_identity))
+        add("device", family, "Model", _spec("model", "Model", "device", family, device_identity))
 
     add("device", "Intune_Devices_Autopilot", "AutopilotObjectId", _spec("autopilot_id", "Autopilot ID", "device", "Intune_Devices_Autopilot", device_mgmt))
     add("device", "Intune_Devices_Autopilot", "Manufacturer", _spec("manufacturer", "Manufacturer", "device", "Intune_Devices_Autopilot", device_mgmt))
     add("device", "Intune_Devices_Autopilot", "Model", _spec("model", "Model", "device", "Intune_Devices_Autopilot", device_mgmt))
     add("device", "Intune_Devices_Autopilot", "EnrollmentState", _spec("enrollment_state", "Enrollment state", "device", "Intune_Devices_Autopilot", device_mgmt))
 
-    for family in ("Intune_ManagedDevices_Compliance", "Intune_iOS_Devices"):
+    for family in ("Intune_ManagedDevices_Compliance", "Intune_iOS_Devices", "Intune_Android_Devices"):
         add("device", family, "ComplianceState", _spec("compliance_state", "Compliance state", "device", family, device_os))
         add("device", family, "OperatingSystem", _spec("operating_system", "Operating system", "device", family, device_os))
+
+    android_family = "Intune_Android_Devices"
+    android_os = device_os
+    android_mgmt = device_mgmt
+    android_activity = "activity"
+    android_connectivity = "connectivity"
+    android_storage = "storage"
+
+    android_bindings = (
+        ("OSVersion", "os_version", "OS version", android_os),
+        ("AndroidSecurityPatchLevel", "android_security_patch", "Android security patch", android_os),
+        ("ComplianceGracePeriodExpiration", "compliance_grace_expiration", "Compliance grace expiration", android_os),
+        ("Rooted", "rooted", "Rooted", android_os),
+        ("IsEncrypted", "is_encrypted", "Encrypted", android_os),
+        ("PartnerReportedThreatState", "partner_threat_state", "Partner threat state", android_os),
+        ("OwnerType", "owner_type", "Owner type", android_mgmt),
+        ("ManagementAgent", "management_agent", "Management agent", android_mgmt),
+        ("DeviceEnrollmentType", "device_enrollment_type", "Device enrollment type", android_mgmt),
+        ("EnrollmentProfileName", "enrollment_profile", "Enrollment profile", android_mgmt),
+        ("DeviceRegistrationState", "device_registration_state", "Registration state", android_mgmt),
+        ("EnrolledDateTime", "enrolled_date", "Enrolled date", android_mgmt),
+        ("ManagementCertificateExpiration", "management_cert_expiration", "Management certificate expiration", android_mgmt),
+        ("AzureADRegistered", "azure_ad_registered", "Azure AD registered", android_mgmt),
+        ("EASActivated", "eas_activated", "EAS activated", android_mgmt),
+        ("EASDeviceId", "eas_device_id", "EAS device ID", android_mgmt),
+        ("EASActivationDateTime", "eas_activation_date", "EAS activation date", android_mgmt),
+        ("LastSyncDateTime", "last_sync", "Last sync", android_activity),
+        ("DaysSinceLastSync", "days_since_last_sync", "Days since last sync", android_activity),
+        ("DeviceActivityStatus", "device_activity_status", "Activity status", android_activity),
+        ("PhoneNumber", "phone_number", "Phone number", android_connectivity),
+        ("IMEI", "imei", "IMEI", android_connectivity),
+        ("MEID", "meid", "MEID", android_connectivity),
+        ("ICCID", "iccid", "ICCID", android_connectivity),
+        ("SubscriberCarrier", "subscriber_carrier", "Carrier", android_connectivity),
+        ("WiFiMacAddress", "wifi_mac_address", "Wi-Fi MAC", android_connectivity),
+        ("TotalStorageGB", "total_storage_gb", "Total storage (GB)", android_storage),
+        ("FreeStorageGB", "free_storage_gb", "Free storage (GB)", android_storage),
+    )
+    for column, key, label, section in android_bindings:
+        add("device", android_family, column, _spec(key, label, "device", android_family, section))
 
     # --- shared mailbox ---
     mb_identity = "identity"
@@ -307,25 +359,56 @@ AUTHORITY_ORDER: dict[tuple[EntityType, str], tuple[str, ...]] = {
         "Intune_ManagedDevices_Compliance",
         "Intune_Devices_Autopilot",
         "Intune_iOS_Devices",
+        "Intune_Android_Devices",
     ),
     ("device", "device_name"): (
         "Intune_ManagedDevices_Compliance",
         "Intune_iOS_Devices",
+        "Intune_Android_Devices",
         "Intune_Devices_Autopilot",
     ),
     ("device", "serial_number"): (
         "Intune_ManagedDevices_Compliance",
         "Intune_Devices_Autopilot",
         "Intune_iOS_Devices",
+        "Intune_Android_Devices",
     ),
     ("device", "compliance_state"): (
         "Intune_ManagedDevices_Compliance",
         "Intune_iOS_Devices",
+        "Intune_Android_Devices",
     ),
     ("device", "operating_system"): (
         "Intune_ManagedDevices_Compliance",
         "Intune_iOS_Devices",
+        "Intune_Android_Devices",
     ),
+    ("device", "manufacturer"): (
+        "Intune_ManagedDevices_Compliance",
+        "Intune_Android_Devices",
+        "Intune_iOS_Devices",
+        "Intune_Devices_Autopilot",
+    ),
+    ("device", "model"): (
+        "Intune_ManagedDevices_Compliance",
+        "Intune_Android_Devices",
+        "Intune_iOS_Devices",
+        "Intune_Devices_Autopilot",
+    ),
+    ("device", "android_security_patch"): ("Intune_Android_Devices",),
+    ("device", "rooted"): ("Intune_Android_Devices",),
+    ("device", "is_encrypted"): (
+        "Intune_Android_Devices",
+        "Intune_iOS_Devices",
+        "Intune_ManagedDevices_Compliance",
+    ),
+    ("device", "partner_threat_state"): ("Intune_Android_Devices",),
+    ("device", "imei"): ("Intune_Android_Devices",),
+    ("device", "meid"): ("Intune_Android_Devices",),
+    ("device", "iccid"): ("Intune_Android_Devices",),
+    ("device", "subscriber_carrier"): ("Intune_Android_Devices",),
+    ("device", "device_enrollment_type"): ("Intune_Android_Devices",),
+    ("device", "enrollment_profile"): ("Intune_Android_Devices",),
     ("shared_mailbox", "display_name"): ("Exchange_SharedMailboxes",),
     ("shared_mailbox", "primary_smtp"): ("Exchange_SharedMailboxes",),
     ("shared_mailbox", "mailbox_immutable_id"): ("Exchange_SharedMailboxes",),
@@ -378,7 +461,15 @@ SECTION_ORDER: dict[EntityType, tuple[str, ...]] = {
         "groups",
         "access_packages",
     ),
-    "device": ("identity", "ownership", "os_compliance", "management", "activity"),
+    "device": (
+        "identity",
+        "ownership",
+        "os_compliance",
+        "management",
+        "activity",
+        "connectivity",
+        "storage",
+    ),
     "shared_mailbox": ("identity", "addresses", "delegation", "settings", "activity"),
 }
 
@@ -393,6 +484,8 @@ SECTION_TITLES: dict[str, str] = {
     "os_compliance": "OS & compliance",
     "management": "Management",
     "activity": "Activity",
+    "connectivity": "Cellular / network",
+    "storage": "Storage",
     "addresses": "Addresses",
     "delegation": "Delegation",
     "settings": "Settings",
