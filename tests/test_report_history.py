@@ -16,6 +16,8 @@ from diffasaurus.core.report_history import (
     aggregate_recent_changes,
     analyze_snapshot,
     compare_snapshots,
+    compare_snapshot_counts,
+    composite_key_label,
     detail_identity,
     expected_business_days,
     family_change_status,
@@ -565,6 +567,107 @@ class RecentChangesUiConsistencyTests(unittest.TestCase):
             self.assertFalse(section.reason_label.isVisible())
             self.assertEqual(status.status, "changed")
 
+    def test_recent_changes_page_constructs(self):
+        from diffasaurus.ui.recent_changes import RecentChangesPage
+
+        page = RecentChangesPage()
+        self.assertIsNotNone(page.period_selector)
+        page.close()
+
+    def test_recent_changes_aggregation_and_apply_report_use_catalog_order(self):
+        from diffasaurus.ui.recent_changes import RecentChangesPage
+        from diffasaurus.ui.report_runner import CATALOG_FAMILY_ORDER
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            write_report(
+                root / "Entra_Group_User_Memberships_20260731-042100.csv",
+                [
+                    {
+                        "UserId": "user-1",
+                        "UserPrincipalName": "ada@example.com",
+                        "UserDisplayName": "Ada",
+                        "GroupId": "group-1",
+                        "GroupName": "Developers",
+                        "MembershipType": "Assigned",
+                    },
+                ],
+            )
+            write_report(
+                root / "Entra_Group_User_Memberships_20260804-042100.csv",
+                [
+                    {
+                        "UserId": "user-1",
+                        "UserPrincipalName": "ada@example.com",
+                        "UserDisplayName": "Ada",
+                        "GroupId": "group-1",
+                        "GroupName": "Developers",
+                        "MembershipType": "Assigned",
+                    },
+                ],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "DisplayName": "Ada"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "DisplayName": "Ada"}],
+            )
+            families = scan_report_history(root)
+            period, label = timedelta(days=15), "15 days"
+            report = aggregate_recent_changes(
+                families,
+                period,
+                period_label=label,
+                family_order=CATALOG_FAMILY_ORDER,
+            )
+            page = RecentChangesPage()
+            page.apply_report(report)
+            rendered = [section.subtitle_label.text() for section in page._sections.values()]
+            self.assertIn("Entra_Users_Properties", rendered)
+            self.assertIn("Entra_Group_User_Memberships", rendered)
+            self.assertLess(
+                CATALOG_FAMILY_ORDER.index("Entra_Users_Properties"),
+                CATALOG_FAMILY_ORDER.index("Entra_Group_User_Memberships"),
+            )
+            self.assertNotEqual(page.card_changed.value.text(), "…")
+            page.close()
+
+    def test_main_window_recent_changes_refresh_path_resolves_catalog_order(self):
+        from unittest.mock import patch
+
+        from diffasaurus.ui.main_window import DiffasaurusWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "diffasaurus.ui.main_window.get_active_reports_dir",
+                return_value=Path(directory),
+            ), patch.object(DiffasaurusWindow, "refresh_history", lambda self: None):
+                window = DiffasaurusWindow()
+                try:
+                    results: list = []
+                    errors: list[str] = []
+
+                    def run_sync(function, args, on_success, on_failure):
+                        try:
+                            results.append(function(*args))
+                        except Exception as exc:
+                            errors.append(str(exc))
+                            on_failure(str(exc))
+
+                    with patch.object(window, "_run_background", run_sync):
+                        window._refresh_recent_changes()
+
+                    self.assertEqual(errors, [])
+                    self.assertEqual(len(results), 1)
+                    window.recent_changes_page.apply_report(results[0])
+                    self.assertEqual(window.recent_changes_page.card_changed.value.text(), "0")
+                finally:
+                    window.close()
+                    window.thread_pool.waitForDone(2_000)
+
 
 class EntraGroupsIdentityDisplayTests(unittest.TestCase):
     FAMILY = "Entra_Groups_Dependencies"
@@ -798,6 +901,588 @@ class EntraGroupsIdentityDisplayTests(unittest.TestCase):
             identity_display_column("Entra_Users_Properties", headers),
             "",
         )
+
+
+def membership_row(
+    user_id: str,
+    group_id: str,
+    *,
+    user_display: str = "",
+    upn: str = "",
+    group_name: str = "",
+    group_mail: str = "",
+    membership_type: str = "Assigned",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "UserId": user_id,
+        "UserPrincipalName": upn or f"{user_id}@example.com",
+        "UserDisplayName": user_display,
+        "UserMail": "",
+        "UserType": "Member",
+        "AccountEnabled": "True",
+        "GroupName": group_name,
+        "GroupId": group_id,
+        "GroupMail": group_mail,
+        "GroupType": "Security",
+        "MembershipType": membership_type,
+        "SecurityEnabled": "True",
+        "MailEnabled": "False",
+        "IsMicrosoft365Group": "False",
+        "IsDynamicGroup": "False",
+        "OnPremisesSyncEnabled": "False",
+        "MembershipRule": "",
+    }
+    row.update(extra)
+    return row
+
+
+class EntraGroupMembershipComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Group_User_Memberships"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = membership_row("template-user", "template-group")
+        for path, rows in (
+            (root / "Entra_Group_User_Memberships_20260731-042100.csv", baseline_rows),
+            (root / "Entra_Group_User_Memberships_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        self.assertEqual(
+            suggested_key(snapshots[0].headers, self.FAMILY),
+            "User + Group",
+        )
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            "User + Group",
+            self.FAMILY,
+        )
+
+    def test_one_user_in_two_groups_is_two_memberships(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                membership_row(
+                    "user-1",
+                    "group-a",
+                    user_display="Aissatou Ba",
+                    group_name="Group A",
+                ),
+                membership_row(
+                    "user-1",
+                    "group-b",
+                    user_display="Aissatou Ba",
+                    group_name="Group B",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed, result.stable), (0, 0, 0, 2))
+
+    def test_two_users_in_one_group_are_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                membership_row(
+                    "user-1",
+                    "group-a",
+                    user_display="User One",
+                    group_name="Developers",
+                ),
+                membership_row(
+                    "user-2",
+                    "group-a",
+                    user_display="User Two",
+                    group_name="Developers",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_added_membership_uses_user_id_and_group_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Aissatou Ba",
+                        group_name="Group A",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Aissatou Ba",
+                        group_name="Group A",
+                    ),
+                    membership_row(
+                        "user-1",
+                        "group-b",
+                        user_display="Aissatou Ba",
+                        group_name="Group B",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.added, 1)
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertEqual(added["user_id"], "user-1")
+            self.assertEqual(added["group_id"], "group-b")
+            self.assertEqual(detail_identity(added), "Aissatou Ba → Group B")
+
+    def test_removed_membership_uses_user_id_and_group_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="John Doe",
+                        group_name="Legacy VPN",
+                    ),
+                ],
+                [],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.removed, 1)
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(removed["user_id"], "user-1")
+            self.assertEqual(removed["group_id"], "group-a")
+            self.assertEqual(detail_identity(removed), "John Doe → Legacy VPN")
+
+    def test_unchanged_membership_remains_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                membership_row(
+                    "user-1",
+                    "group-a",
+                    user_display="Jane Doe",
+                    group_name="Developers",
+                    membership_type="Direct",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, list(rows))
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed, result.stable), (0, 0, 0, 1))
+
+    def test_group_name_rename_remains_changed_not_remove_add(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        group_name="Developers",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        group_name="Engineering",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "GroupName")
+            self.assertEqual(detail_identity(changed), "Jane Doe → Engineering")
+
+    def test_upn_change_remains_changed_not_remove_add(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        upn="old.upn@example.com",
+                        group_name="Developers",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        upn="new.upn@example.com",
+                        group_name="Developers",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(
+                detail
+                for detail in result.details
+                if detail["change"] == "Changed"
+                and detail["column"] == "UserPrincipalName"
+            )
+            self.assertEqual(changed["before"], "old.upn@example.com")
+            self.assertEqual(changed["after"], "new.upn@example.com")
+
+    def test_membership_type_change_remains_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        group_name="Developers",
+                        membership_type="Direct",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        group_name="Developers",
+                        membership_type="Dynamic",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "MembershipType")
+            self.assertEqual(changed["before"], "Direct")
+            self.assertEqual(changed["after"], "Dynamic")
+            self.assertEqual(detail_identity(changed), "Jane Doe → Developers")
+
+    def test_missing_user_display_name_falls_back_to_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="",
+                        upn="jane.doe@example.com",
+                        group_name="Developers",
+                    ),
+                ],
+            )
+            added = next(detail for detail in self._compare(baseline, latest).details if detail["change"] == "Added")
+            self.assertEqual(detail_identity(added), "jane.doe@example.com → Developers")
+
+    def test_missing_group_name_falls_back_to_group_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        group_name="",
+                    ),
+                ],
+            )
+            added = next(detail for detail in self._compare(baseline, latest).details if detail["change"] == "Added")
+            self.assertEqual(detail_identity(added), "Jane Doe → group-a")
+
+    def test_same_upn_does_not_collapse_membership_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                membership_row(
+                    "user-1",
+                    "group-a",
+                    upn="shared@example.com",
+                    user_display="Shared User",
+                    group_name="Group A",
+                ),
+                membership_row(
+                    "user-1",
+                    "group-b",
+                    upn="shared@example.com",
+                    user_display="Shared User",
+                    group_name="Group B",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            composite = self._compare(baseline, latest)
+            upn_only = compare_snapshots(baseline, latest, "UserPrincipalName")
+            self.assertEqual(composite.stable, 2)
+            self.assertEqual(upn_only.stable, 1)
+
+    def test_family_change_status_uses_composite_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = datetime(2026, 8, 4, 13, 5, 0)
+            rows = [
+                membership_row("user-1", "group-a", user_display="A", group_name="Group A"),
+                membership_row("user-1", "group-b", user_display="A", group_name="Group B"),
+            ]
+            write_report(
+                root / "Entra_Group_User_Memberships_20260731-042100.csv",
+                rows,
+            )
+            write_report(
+                root / "Entra_Group_User_Memberships_20260804-042100.csv",
+                rows,
+            )
+            status = family_change_status(
+                self.FAMILY,
+                scan_report_history(root)[self.FAMILY],
+                timedelta(hours=48),
+                reference=reference,
+            )
+            self.assertEqual(status.key_column, "User + Group")
+            self.assertEqual(status.summary.stable, 2)
+
+    def test_recent_changes_search_matches_user_group_and_ids(self):
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        upn="jane.doe@example.com",
+                        group_name="Developers",
+                        membership_type="Direct",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        user_display="Jane Doe",
+                        upn="jane.doe@example.com",
+                        group_name="Developers",
+                        membership_type="Dynamic",
+                    ),
+                ],
+            )
+            summary = self._compare(baseline, latest)
+            section = FamilyChangeSection()
+            section._details = summary
+            section._filter = "All"
+
+            for needle in ("Jane Doe", "jane.doe@example.com", "Developers", "user-1", "group-a"):
+                section.detail_search.setText(needle)
+                section._apply_detail_filters()
+                self.assertEqual(section.detail_table.rowCount(), 1, needle)
+            section.close()
+
+    def test_other_families_retain_single_key_behavior(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "DisplayName": "Ada"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "DisplayName": "Ada"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+            self.assertEqual(
+                composite_key_label("Entra_Users_Properties", snapshots[0].headers),
+                "",
+            )
+
+    def test_compare_without_family_still_allows_manual_upn_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        upn="shared@example.com",
+                        group_name="Group A",
+                    ),
+                ],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-a",
+                        upn="shared@example.com",
+                        group_name="Group A",
+                    ),
+                ],
+            )
+            result = compare_snapshots(baseline, latest, "UserPrincipalName")
+            self.assertEqual(result.stable, 1)
+
+    def test_comparison_summary_unit_uses_memberships_for_membership_family(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(
+            comparison_summary_unit("Entra_Group_User_Memberships"),
+            "memberships",
+        )
+        self.assertEqual(comparison_summary_unit("Entra_Users_Properties"), "rows")
+
+    def test_identity_tooltip_contains_full_relationship_text(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        identity = "Aude ZIMMERMANN → GD_PRD_MyGroup"
+        detail = {
+            "change": "Added",
+            "key": "user-1\x1fgroup-1",
+            "identity": identity,
+            "user_id": "user-1",
+            "group_id": "group-1",
+            "column": "",
+            "before": "",
+            "after": "New row",
+        }
+        tooltip = identity_tooltip(detail)
+        self.assertIn(identity, tooltip)
+        self.assertIn("UserId: user-1", tooltip)
+        self.assertIn("GroupId: group-1", tooltip)
+
+    def test_long_membership_identity_is_not_truncated_in_detail(self):
+        user_name = "Aude ZIMMERMANN"
+        group_name = "GD_PRD_" + ("MyGroup" * 12)
+        identity = f"{user_name} → {group_name}"
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-1",
+                        user_display=user_name,
+                        group_name=group_name,
+                    ),
+                ],
+            )
+            added = next(
+                detail for detail in self._compare(baseline, latest).details
+                if detail["change"] == "Added"
+            )
+            self.assertEqual(detail_identity(added), identity)
+            self.assertNotIn("...", detail_identity(added))
+            self.assertGreater(len(detail_identity(added)), 80)
+
+    def test_membership_display_text_splits_user_and_group_without_ellipsis(self):
+        from diffasaurus.ui.comparison_presentation import (
+            identity_display_text,
+            membership_identity_display_text,
+        )
+
+        identity = "Aude ZIMMERMANN → GD_PRD_Very_Long_Group_Name"
+        self.assertEqual(
+            membership_identity_display_text(identity),
+            "Aude ZIMMERMANN\n→ GD_PRD_Very_Long_Group_Name",
+        )
+        detail = {"identity": identity, "key": "user-1\x1fgroup-1"}
+        self.assertEqual(identity_display_text(detail, self.FAMILY), membership_identity_display_text(identity))
+        self.assertNotIn("...", identity_display_text(detail, self.FAMILY))
+
+    def test_membership_table_item_preserves_full_group_name(self):
+        from PyQt6.QtWidgets import QTableWidget
+
+        from diffasaurus.ui.comparison_presentation import (
+            MEMBERSHIP_FAMILY,
+            identity_tooltip,
+            populate_comparison_detail_table,
+        )
+
+        user_name = "Alexandre GOMEZ"
+        group_name = "GD_PRD_Extended_Access_Package_Administrators"
+        identity = f"{user_name} → {group_name}"
+        detail = {
+            "change": "Added",
+            "key": "user-1\x1fgroup-1",
+            "identity": identity,
+            "user_id": "user-1",
+            "group_id": "group-1",
+            "column": "",
+            "before": "",
+            "after": "New row",
+        }
+        table = QTableWidget(0, 5)
+        populate_comparison_detail_table(table, [detail], family=MEMBERSHIP_FAMILY)
+        item = table.item(0, 1)
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertIn(group_name, item.text())
+        self.assertNotIn("...", item.text())
+        self.assertIn(identity, identity_tooltip(detail))
+        table.close()
+
+    def test_missing_group_name_falls_back_to_group_mail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    membership_row(
+                        "user-1",
+                        "group-1",
+                        user_display="Jane Doe",
+                        group_name="",
+                        group_mail="finance@contoso.com",
+                    ),
+                ],
+            )
+            added = next(
+                detail for detail in self._compare(baseline, latest).details
+                if detail["change"] == "Added"
+            )
+            self.assertEqual(detail_identity(added), "Jane Doe → finance@contoso.com")
+
+    def test_non_membership_identity_display_remains_single_line(self):
+        from diffasaurus.ui.comparison_presentation import identity_display_text
+
+        detail = {"identity": "Ada Example", "key": "ada@example.com"}
+        self.assertEqual(
+            identity_display_text(detail, "Entra_Users_Properties"),
+            "Ada Example",
+        )
+
+    def test_membership_compare_counts_unchanged_by_presentation_helpers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    membership_row("user-1", "group-a", group_name="Group A"),
+                    membership_row("user-1", "group-b", group_name="Group B"),
+                ],
+                [
+                    membership_row("user-1", "group-a", group_name="Group A Renamed"),
+                    membership_row("user-1", "group-b", group_name="Group B"),
+                    membership_row("user-2", "group-c", group_name="Group C"),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (1, 0, 1))
 
 
 class StandaloneHistoryTests(unittest.TestCase):

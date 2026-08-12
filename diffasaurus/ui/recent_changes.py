@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -14,7 +13,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -25,7 +23,10 @@ from diffasaurus.core.report_history import (
     FamilyChangeStatus,
     RecentChangesReport,
     ReportSnapshot,
-    detail_identity,
+)
+from diffasaurus.ui.comparison_presentation import (
+    configure_comparison_detail_table,
+    populate_comparison_detail_table,
 )
 from diffasaurus.ui.period_selector import PeriodSelector
 from diffasaurus.ui.report_runner import family_display_name
@@ -208,10 +209,17 @@ class FamilyChangeSection(QFrame):
             )
 
         if item.summary:
-            self.counts_label.setText(
-                f"{item.summary.added} added · {item.summary.removed} removed · "
-                f"{item.summary.changed} changed"
-            )
+            if item.family == "Entra_Group_User_Memberships":
+                self.counts_label.setText(
+                    f"{item.summary.added} memberships added · "
+                    f"{item.summary.removed} removed · "
+                    f"{item.summary.changed} modified"
+                )
+            else:
+                self.counts_label.setText(
+                    f"{item.summary.added} added · {item.summary.removed} removed · "
+                    f"{item.summary.changed} changed"
+                )
             self.counts_label.show()
         else:
             self.counts_label.hide()
@@ -236,6 +244,7 @@ class FamilyChangeSection(QFrame):
         self.compare_button.setEnabled(bool(comparable))
         self.toggle_button.setEnabled(bool(comparable))
         self.toggle_button.setVisible(bool(comparable))
+        configure_comparison_detail_table(self.detail_table, item.family)
 
         if comparable and self._details:
             self._apply_detail_filters()
@@ -294,40 +303,13 @@ class FamilyChangeSection(QFrame):
                 break
             matching.append(detail)
 
-        self.detail_table.setUpdatesEnabled(False)
-        self.detail_table.setRowCount(len(matching))
-        for row, detail in enumerate(matching):
-            identity = detail_identity(detail)
-            values = (
-                detail["change"],
-                identity,
-                detail["column"],
-                detail["before"],
-                detail["after"],
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 1 and identity != detail["key"]:
-                    item.setToolTip(detail["key"])
-                if column == 0:
-                    item.setForeground(
-                        QColor(
-                            {
-                                "Added": COLORS["green"],
-                                "Removed": COLORS["red"],
-                                "Changed": COLORS["amber"],
-                            }.get(value, COLORS["text"])
-                        )
-                    )
-                    item.setFont(
-                        QFont(
-                            item.font().family(),
-                            item.font().pointSize(),
-                            QFont.Weight.Bold,
-                        )
-                    )
-                self.detail_table.setItem(row, column, item)
-        self.detail_table.setUpdatesEnabled(True)
+        configure_comparison_detail_table(self.detail_table, self._family)
+        populate_comparison_detail_table(
+            self.detail_table,
+            matching,
+            family=self._family,
+            default_text_color=COLORS["text"],
+        )
         if has_more:
             self.detail_notice.setText(
                 f"Showing the first {DETAIL_TABLE_LIMIT:,} matching details for speed. "

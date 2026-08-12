@@ -44,6 +44,9 @@ from diffasaurus.core.report_history import (
     analyze_snapshot,
     common_headers,
     compare_snapshots,
+    composite_key_label,
+    comparison_summary_unit,
+    detail_identity,
     filter_history_by_days,
     metric_series,
     recent_movement,
@@ -55,6 +58,10 @@ from diffasaurus.core.report_history import (
 )
 from diffasaurus.core.paths import project_root
 from diffasaurus.core.settings import get_active_reports_dir
+from diffasaurus.ui.comparison_presentation import (
+    configure_comparison_detail_table,
+    populate_comparison_detail_table,
+)
 from diffasaurus.ui.report_runner import CATALOG_FAMILY_ORDER, RunScriptsDialog
 from diffasaurus.ui.source_settings import ReportSourceSettingsDialog
 from diffasaurus.ui.charts import ChangeBars, LineChart
@@ -243,6 +250,7 @@ class DiffasaurusWindow(QMainWindow):
         self.current_history: list[tuple[ReportSnapshot, dict[str, float]]] = []
         self.current_schema_changes = []
         self.current_comparison: ComparisonSummary | None = None
+        self._comparison_family: str | None = None
         self.current_filter = "All"
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
@@ -1420,11 +1428,16 @@ class DiffasaurusWindow(QMainWindow):
         baseline = self.baseline_combo.currentData()
         latest = self.latest_combo.currentData()
         headers = common_headers(baseline, latest) if baseline and latest else []
+        family = baseline.family if isinstance(baseline, ReportSnapshot) else None
         selected = self.key_combo.currentText()
         self.key_combo.clear()
-        self.key_combo.addItems(headers)
-        preferred = suggested_key(headers)
-        self.key_combo.setCurrentText(selected if selected in headers else preferred)
+        key_options = list(headers)
+        composite_label = composite_key_label(family, headers)
+        if composite_label and composite_label not in key_options:
+            key_options.insert(0, composite_label)
+        self.key_combo.addItems(key_options)
+        preferred = suggested_key(headers, family)
+        self.key_combo.setCurrentText(selected if selected in key_options else preferred)
 
     def run_comparison(self):
         baseline = self.baseline_combo.currentData()
@@ -1439,9 +1452,11 @@ class DiffasaurusWindow(QMainWindow):
         self.compare_button.setEnabled(False)
         self.compare_button.setText("Comparing…")
         self._show_progress(0, 0, "Comparing two CSV snapshots…")
+        family = baseline.family if isinstance(baseline, ReportSnapshot) else None
+        self._comparison_family = family
         self._run_background(
             compare_snapshots,
-            (baseline, latest, self.key_combo.currentText()),
+            (baseline, latest, self.key_combo.currentText(), family),
             lambda summary: self._comparison_ready(generation, summary),
             lambda message: self._comparison_failed(generation, message),
         )
@@ -1459,7 +1474,9 @@ class DiffasaurusWindow(QMainWindow):
             ("Changed", summary.changed),
             ("Stable", summary.stable),
         ):
-            self.compare_cards[title].set_data(f"{value:,}", "rows")
+            unit = comparison_summary_unit(self._comparison_family)
+            self.compare_cards[title].set_data(f"{value:,}", unit)
+        configure_comparison_detail_table(self.diff_table, self._comparison_family)
         self.set_change_filter("All")
 
     def _comparison_failed(self, generation: int, message: str):
@@ -1785,37 +1802,13 @@ class DiffasaurusWindow(QMainWindow):
                 break
             matching.append(detail)
 
-        self.diff_table.setUpdatesEnabled(False)
-        self.diff_table.setRowCount(len(matching))
-        for row, detail in enumerate(matching):
-            values = (
-                detail["change"],
-                detail["key"],
-                detail["column"],
-                detail["before"],
-                detail["after"],
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setForeground(
-                        QColor(
-                            {
-                                "Added": COLORS["green"],
-                                "Removed": COLORS["red"],
-                                "Changed": COLORS["amber"],
-                            }.get(value, COLORS["text"])
-                        )
-                    )
-                    item.setFont(
-                        QFont(
-                            item.font().family(),
-                            item.font().pointSize(),
-                            QFont.Weight.Bold,
-                        )
-                    )
-                self.diff_table.setItem(row, column, item)
-        self.diff_table.setUpdatesEnabled(True)
+        configure_comparison_detail_table(self.diff_table, self._comparison_family)
+        populate_comparison_detail_table(
+            self.diff_table,
+            matching,
+            family=self._comparison_family,
+            default_text_color=COLORS["text"],
+        )
         if has_more:
             self.diff_notice.setText(
                 f"Showing the first {DETAIL_TABLE_LIMIT:,} matching details for speed. "
@@ -1856,7 +1849,7 @@ class DiffasaurusWindow(QMainWindow):
                 writer.writerow(
                     (
                         detail["change"],
-                        detail["key"],
+                        detail_identity(detail),
                         detail["column"],
                         detail["before"],
                         detail["after"],
