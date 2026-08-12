@@ -50,6 +50,23 @@ FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
     "Entra_Groups_Dependencies": ("DisplayName",),
 }
 
+COMPOSITE_KEY_DELIMITER = "\x1f"
+
+FAMILY_COMPOSITE_KEYS: dict[str, tuple[str, ...]] = {
+    "Entra_Group_User_Memberships": ("UserId", "GroupId"),
+}
+
+FAMILY_COMPOSITE_KEY_LABELS: dict[str, str] = {
+    "Entra_Group_User_Memberships": "User + Group",
+}
+
+FAMILY_RELATIONSHIP_IDENTITY: dict[str, dict[str, tuple[str, ...]]] = {
+    "Entra_Group_User_Memberships": {
+        "user": ("UserDisplayName", "UserPrincipalName", "UserId"),
+        "group": ("GroupName", "GroupMail", "GroupId"),
+    },
+}
+
 _ANALYSIS_CACHE: dict[
     tuple[str, str, str, int, int],
     tuple["ReportSnapshot", str, dict[str, float]],
@@ -335,12 +352,66 @@ def snapshot_with_headers(snapshot: ReportSnapshot) -> ReportSnapshot:
     )
 
 
-def suggested_key(headers: list[str] | tuple[str, ...]) -> str:
+def suggested_key(
+    headers: list[str] | tuple[str, ...],
+    family: str | None = None,
+) -> str:
+    composite_label = composite_key_label(family, headers)
+    if composite_label:
+        return composite_label
     normalized = {header.lower(): header for header in headers}
     for candidate in PREFERRED_KEYS:
         if candidate.lower() in normalized:
             return normalized[candidate.lower()]
     return headers[0] if headers else ""
+
+
+def composite_key_columns(
+    family: str | None,
+    headers: list[str] | tuple[str, ...],
+) -> tuple[str, ...] | None:
+    if not family:
+        return None
+    wanted = FAMILY_COMPOSITE_KEYS.get(family, ())
+    if not wanted:
+        return None
+    normalized = {header.lower(): header for header in headers}
+    resolved = tuple(
+        normalized[column.lower()]
+        for column in wanted
+        if column.lower() in normalized
+    )
+    return resolved if len(resolved) == len(wanted) else None
+
+
+def composite_key_label(
+    family: str | None,
+    headers: list[str] | tuple[str, ...],
+) -> str:
+    columns = composite_key_columns(family, headers)
+    if not columns:
+        return ""
+    return FAMILY_COMPOSITE_KEY_LABELS.get(family or "", " + ".join(columns))
+
+
+def uses_composite_key(
+    family: str | None,
+    headers: list[str] | tuple[str, ...],
+    key_column: str,
+) -> bool:
+    label = composite_key_label(family, headers)
+    return bool(label and key_column == label)
+
+
+def comparison_key_columns(
+    family: str | None,
+    headers: list[str] | tuple[str, ...],
+    key_column: str,
+) -> tuple[str, ...]:
+    composite_columns = composite_key_columns(family, headers)
+    if composite_columns and uses_composite_key(family, headers, key_column):
+        return composite_columns
+    return (key_column,)
 
 
 def identity_display_column(
@@ -359,6 +430,12 @@ def identity_display_column(
 
 def detail_identity(detail: dict[str, str]) -> str:
     return detail.get("identity") or detail.get("key", "")
+
+
+def comparison_summary_unit(family: str | None) -> str:
+    if family == "Entra_Group_User_Memberships":
+        return "memberships"
+    return "rows"
 
 
 def _identity_label(
@@ -381,6 +458,105 @@ def _identity_label(
     return display or key
 
 
+def _pick_identity_label(
+    primary_row: dict[str, str],
+    fallback_row: dict[str, str],
+    columns: tuple[str, ...],
+) -> str:
+    for column in columns:
+        value = str(primary_row.get(column, "") or "").strip()
+        if value:
+            return value
+    for column in columns:
+        value = str(fallback_row.get(column, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _relationship_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+    spec: dict[str, tuple[str, ...]],
+    composite_columns: tuple[str, ...] = (),
+) -> str:
+    before_row = before_map.get(key, {})
+    after_row = after_map.get(key, {})
+    if change == "Added":
+        primary_row, fallback_row = after_row, after_row
+    elif change == "Removed":
+        primary_row, fallback_row = before_row, before_row
+    else:
+        primary_row, fallback_row = after_row, before_row
+    user = _pick_identity_label(primary_row, fallback_row, spec["user"])
+    group = _pick_identity_label(primary_row, fallback_row, spec["group"])
+    if not user and composite_columns:
+        user = str(
+            after_row.get(composite_columns[0], "")
+            or before_row.get(composite_columns[0], "")
+            or ""
+        ).strip()
+    if not group and len(composite_columns) > 1:
+        group = str(
+            after_row.get(composite_columns[1], "")
+            or before_row.get(composite_columns[1], "")
+            or ""
+        ).strip()
+    if user and group:
+        return f"{user} → {group}"
+    return user or group or key
+
+
+def _attach_detail_identity(
+    detail: dict[str, str],
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+    family: str | None,
+    composite_columns: tuple[str, ...],
+    display_column: str,
+) -> None:
+    relationship_spec = FAMILY_RELATIONSHIP_IDENTITY.get(family or "")
+    if relationship_spec:
+        detail["identity"] = _relationship_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+            relationship_spec,
+            composite_columns,
+        )
+        if composite_columns:
+            parts = key.split(COMPOSITE_KEY_DELIMITER)
+            if len(parts) == len(composite_columns):
+                detail["user_id"] = parts[0]
+                detail["group_id"] = parts[1]
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        for field in ("UserPrincipalName", "UserDisplayName", "GroupName"):
+            value = _pick_identity_label(primary_row, fallback_row, (field,))
+            if value:
+                detail[field] = value
+        return
+    if display_column:
+        detail["identity"] = _identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+            display_column,
+        )
+
+
 def _compare_snapshots(
     baseline: ReportSnapshot,
     latest: ReportSnapshot,
@@ -389,7 +565,12 @@ def _compare_snapshots(
     family: str | None = None,
 ) -> ComparisonSummary:
     common = common_headers(baseline, latest)
-    if not key_column or key_column not in common:
+    composite_columns = composite_key_columns(family, common)
+    use_composite = bool(
+        composite_columns
+        and uses_composite_key(family, common, key_column)
+    )
+    if not use_composite and (not key_column or key_column not in common):
         raise ValueError("Choose a key column shared by both reports.")
 
     comparison_cache_key = ""
@@ -421,11 +602,19 @@ def _compare_snapshots(
 
     _, baseline_rows = read_csv_rows(baseline.path)
     _, latest_rows = read_csv_rows(latest.path)
+    key_columns = comparison_key_columns(family, common, key_column)
 
     def keyed(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
         result = {}
         for row in rows:
-            key = str(row.get(key_column, "") or "").strip()
+            if use_composite:
+                parts = [
+                    str(row.get(column, "") or "").strip()
+                    for column in key_columns
+                ]
+                key = COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
+            else:
+                key = str(row.get(key_column, "") or "").strip()
             if key:
                 result[key] = row
         return result
@@ -439,6 +628,7 @@ def _compare_snapshots(
     shared_keys = sorted(before_keys & after_keys, key=str.lower)
     details: list[dict[str, str]] = []
     display_column = identity_display_column(family, common) if include_details else ""
+    skip_columns = set(key_columns)
 
     if include_details:
         for key in added_keys:
@@ -449,10 +639,16 @@ def _compare_snapshots(
                 "before": "",
                 "after": "New row",
             }
-            if display_column:
-                detail["identity"] = _identity_label(
-                    key, "Added", before_map, after_map, display_column
-                )
+            _attach_detail_identity(
+                detail,
+                key,
+                "Added",
+                before_map,
+                after_map,
+                family,
+                composite_columns or (),
+                display_column,
+            )
             details.append(detail)
         for key in removed_keys:
             detail = {
@@ -462,17 +658,23 @@ def _compare_snapshots(
                 "before": "Existing row",
                 "after": "",
             }
-            if display_column:
-                detail["identity"] = _identity_label(
-                    key, "Removed", before_map, after_map, display_column
-                )
+            _attach_detail_identity(
+                detail,
+                key,
+                "Removed",
+                before_map,
+                after_map,
+                family,
+                composite_columns or (),
+                display_column,
+            )
             details.append(detail)
 
     changed_rows = 0
     for key in shared_keys:
         row_changed = False
         for column in common:
-            if column == key_column:
+            if column in skip_columns:
                 continue
             before_value = str(before_map[key].get(column, "") or "").strip()
             after_value = str(after_map[key].get(column, "") or "").strip()
@@ -486,10 +688,16 @@ def _compare_snapshots(
                         "before": before_value,
                         "after": after_value,
                     }
-                    if display_column:
-                        detail["identity"] = _identity_label(
-                            key, "Changed", before_map, after_map, display_column
-                        )
+                    _attach_detail_identity(
+                        detail,
+                        key,
+                        "Changed",
+                        before_map,
+                        after_map,
+                        family,
+                        composite_columns or (),
+                        display_column,
+                    )
                     details.append(detail)
         changed_rows += int(row_changed)
 
@@ -542,8 +750,15 @@ def compare_snapshot_counts(
     baseline: ReportSnapshot,
     latest: ReportSnapshot,
     key_column: str,
+    family: str | None = None,
 ) -> ComparisonSummary:
-    return _compare_snapshots(baseline, latest, key_column, include_details=False)
+    return _compare_snapshots(
+        baseline,
+        latest,
+        key_column,
+        include_details=False,
+        family=family,
+    )
 
 
 def _snapshot_signature(snapshot: ReportSnapshot) -> tuple[str, str, str, int, int]:
@@ -1043,7 +1258,7 @@ def family_change_status(
     baseline = snapshot_with_headers(baseline)
     latest = snapshot_with_headers(latest)
     headers = common_headers(baseline, latest)
-    key_column = suggested_key(headers)
+    key_column = suggested_key(headers, family)
     if not key_column:
         return FamilyChangeStatus(
             family=family,
@@ -1059,7 +1274,7 @@ def family_change_status(
         if include_details:
             summary = compare_snapshots(baseline, latest, key_column, family)
         else:
-            summary = compare_snapshot_counts(baseline, latest, key_column)
+            summary = compare_snapshot_counts(baseline, latest, key_column, family)
     except Exception:
         return FamilyChangeStatus(
             family=family,
@@ -1143,11 +1358,11 @@ def recent_movement(
     window = snapshots[-(max_intervals + 1):]
     for baseline, latest in zip(window[:-1], window[1:]):
         headers = common_headers(baseline, latest)
-        key = suggested_key(headers)
+        key = suggested_key(headers, baseline.family)
         if not key:
             continue
         try:
-            summary = compare_snapshot_counts(baseline, latest, key)
+            summary = compare_snapshot_counts(baseline, latest, key, baseline.family)
         except Exception:
             continue
         latest_summary = summary
