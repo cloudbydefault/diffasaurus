@@ -68,7 +68,16 @@ from diffasaurus.ui.charts import ChangeBars, LineChart
 from diffasaurus.ui.entity_history import EntityHistoryPage
 from diffasaurus.ui.point_in_time import PointInTimePage
 from diffasaurus.ui.recent_changes import RecentChangesPage
+from diffasaurus.ui.configuration_policy_page import ConfigurationPolicyPage
 from diffasaurus.ui.entity_index_controller import EntityIndexController
+from diffasaurus.ui.navigation_pages import (
+    PAGE_CONFIGURATION_POLICIES,
+    PAGE_ENTITY_HISTORY,
+    PAGE_POINT_IN_TIME,
+    PAGE_RECENT_CHANGES,
+    PAGE_SNAPSHOT_EXPLORER,
+    PAGE_TITLES,
+)
 from diffasaurus.ui.progress_coordinator import ProgressCoordinator
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
 
@@ -345,6 +354,7 @@ class DiffasaurusWindow(QMainWindow):
             "▤   Fossil library",
             "⇄   Compare snapshots",
             "▥   Explore snapshots",
+            "⚙   Configuration policies",
         ):
             button = QPushButton(label)
             button.setCheckable(True)
@@ -428,6 +438,8 @@ class DiffasaurusWindow(QMainWindow):
         self.stack.addWidget(self._build_compare())
         self.snapshot_explorer = SnapshotExplorer()
         self.stack.addWidget(self.snapshot_explorer)
+        self.configuration_policy_page = ConfigurationPolicyPage()
+        self.stack.addWidget(self.configuration_policy_page)
         outer.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.family_label.setVisible(False)
@@ -767,38 +779,22 @@ class DiffasaurusWindow(QMainWindow):
         for current, button in enumerate(self.nav_buttons):
             button.setChecked(current == index)
         self.stack.setCurrentIndex(index)
-        on_landing = index in (0, 1, 2)
-        self.family_label.setVisible(not on_landing)
-        self.family_combo.setVisible(not on_landing)
-        titles = (
-            (
-                "Recent changes",
-                "See what changed across every supported report since your last collections.",
-            ),
-            (
-                "Entity history",
-                "Trace one user, device, or shared mailbox across every snapshot that knows about it.",
-            ),
-            (
-                "Point-in-Time",
-                "Reconstruct what was known about an entity at a selected date.",
-            ),
-            ("The dig site", "Unearthing your Microsoft 365 history, one CSV fossil at a time."),
-            ("Scheduled run health", "See which weekday collections produced evidence—and which outputs are missing."),
-            ("Fossil library", "Browse the CSV snapshots buried in your tenant timeline."),
-            ("Compare snapshots", "Explain exactly what appeared, disappeared, or changed."),
-            (
-                "Snapshot explorer",
-                "Inspect raw tenant data, combine filters, and open report-aware dashboards.",
-            ),
-        )
-        self.page_title.setText(titles[index][0])
-        self.page_subtitle.setText(titles[index][1])
-        if index == 7:
+        on_landing = index in (PAGE_RECENT_CHANGES, PAGE_ENTITY_HISTORY, PAGE_POINT_IN_TIME)
+        on_configuration_policies = index == PAGE_CONFIGURATION_POLICIES
+        show_family = not on_landing and not on_configuration_policies
+        self.family_label.setVisible(show_family)
+        self.family_combo.setVisible(show_family)
+        title, subtitle = PAGE_TITLES[index]
+        self.page_title.setText(title)
+        self.page_subtitle.setText(subtitle)
+        if index == PAGE_SNAPSHOT_EXPLORER:
             self.snapshot_explorer.activate()
-        if index == 0:
+        if index == PAGE_CONFIGURATION_POLICIES:
+            self.configuration_policy_page.activate(self.report_dir)
+        self._update_source_badge()
+        if index == PAGE_RECENT_CHANGES:
             self._refresh_recent_changes()
-        if index in (1, 2):
+        if index in (PAGE_ENTITY_HISTORY, PAGE_POINT_IN_TIME):
             self._ensure_entity_index()
 
     def _run_background(
@@ -872,6 +868,11 @@ class DiffasaurusWindow(QMainWindow):
         self.loading_bar.setValue(0)
 
     def _update_source_badge(self, prefix: str = "●"):
+        if self.stack.currentIndex() == PAGE_CONFIGURATION_POLICIES:
+            self.source_badge.setText(
+                self.configuration_policy_page.source_badge_text(self.report_dir)
+            )
+            return
         source_name = "LOCAL DATABASE" if self.report_dir.name == "reports" else self.report_dir.name.upper()
         self.source_badge.setText(
             f"{prefix}  {source_name}  ·  {sum(map(len, self.families.values()))} CSV"
@@ -1061,6 +1062,7 @@ class DiffasaurusWindow(QMainWindow):
     def refresh_history(self):
         selected = self.family_combo.currentText()
         self.report_dir = get_active_reports_dir()
+        self.configuration_policy_page.invalidate()
         self._family_generation += 1
         self._family_cancelled.set()
         self._family_timer.stop()
@@ -1104,6 +1106,8 @@ class DiffasaurusWindow(QMainWindow):
         self._update_source_badge()
         self._refresh_run_health()
         self._refresh_recent_changes()
+        if self.stack.currentIndex() == PAGE_CONFIGURATION_POLICIES:
+            self.configuration_policy_page.activate(self.report_dir)
         if self._persistent_entity_index and self._entity_index_controller is not None:
             self._ensure_persistent_entity_sync_after_scan()
         else:
