@@ -1,0 +1,44 @@
+{
+  "id": "setting-root",
+  "settingInstance": {
+    "@odata.type": "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance",
+    "settingDefinitionId": "def-root",
+    "groupSettingCollectionValue": [
+      {
+        "settingInstance": {
+          "@odata.type": "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance",
+          "settingDefinitionId": "def-l1-a",
+          "groupSettingCollectionValue": [
+            {
+              "settingInstance": {
+                "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+                "settingDefinitionId": "def-l2-a",
+                "choiceSettingValue": {
+                  "value": "option-a",
+                  "children": [
+                    {
+                      "settingInstance": {
+                        "@odata.type": "#microsoft.graph.deviceManagementConfigurationSimpleSettingInstance",
+                        "settingDefinitionId": "def-l3-a"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "settingInstance": {
+          "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+          "settingDefinitionId": "def-l1-b",
+          "choiceSettingValue": {
+            "value": "option-b",
+            "children": []
+          }
+        }
+      }
+    ]
+  }
+}
