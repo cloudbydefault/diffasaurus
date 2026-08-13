@@ -9,6 +9,40 @@ helps you chart tenant evolution, spot movement, compare snapshots, trace
 entities, and reconstruct what was known at a chosen date. Exploring history is
 read-only; it does not modify your tenant or require a cloud backend.
 
+## How Diffasaurus gets its history
+
+Diffasaurus is an investigation engine, not a historical Microsoft 365 API. It
+does not query the tenant today and reconstruct the past from current state.
+Historical answers come from **dated snapshots collected at that time** and
+stored in the active report source.
+
+Missing collections are missing evidence. Diffasaurus does not invent an
+unchanged state when no snapshot exists for a period.
+
+```
+Microsoft 365 / Entra / Intune / Exchange
+        ↓
+scheduled or on-demand collectors
+        ↓
+dated snapshots
+        ↓
+SharePoint / OneDrive / local report source
+        ↓
+Diffasaurus
+        ↓
+historical investigation
+```
+
+**Collection modes**
+
+1. **Generate reports** inside Diffasaurus (on-demand PowerShell exporters)
+2. **Scheduled Azure Automation runbooks** (recommended for continuous history)
+3. **Compatible exports** copied into the active report source
+
+For useful long-term history, schedule recurring collection rather than relying
+on one-off exports alone. See [Collection architecture](docs/collection-architecture.md)
+and [Azure Automation collectors](collectors/azure-automation/README.md).
+
 ![Diffasaurus Dig site](docs/diffasaurus-dig-site.png)
 
 *Screenshots contain illustrative or anonymized data.*
@@ -20,6 +54,7 @@ read-only; it does not modify your tenant or require a cloud backend.
 - Snapshot comparison with field-level diffs
 - Entity history for users, devices, and shared mailboxes
 - Point-in-Time reconstruction at a selected date
+- Semantic Intune Configuration Policy history, settings, assignments, and diffs
 - Local, read-only analysis—no database server required
 
 ## What administrators can answer
@@ -79,16 +114,23 @@ entity types.
 
 ## How it works
 
-1. **Generate or collect** dated CSV reports (PowerShell scripts via **Generate
-   reports**, or copy exports into a folder).
+1. **Generate or collect** dated snapshots (PowerShell scripts via **Generate
+   reports**, scheduled automation runbooks, or copy exports into a folder).
 2. **Select the report source** folder in the app (local, OneDrive, or
    SharePoint-synced).
 3. **Investigate** charts, recent changes, entity history, and Point-in-Time
    locally.
 
-CSV files remain the historical source of truth. Diffasaurus builds a derived
-local SQLite index (`config/entity_index/` and related caches) so large
-libraries stay responsive; indexes can be rebuilt from the CSVs. Filename
+**Historical source of truth**
+
+- **Standard report families** — dated CSV files are the authoritative evidence.
+- **Intune Configuration Policies** — the rich Policy Snapshot Bundle is the
+  semantic source of truth; its top-level anchor CSV supports discovery and
+  scheduling evidence only.
+
+Diffasaurus builds derived local SQLite indexes and caches
+(`config/entity_index/` and related paths) for responsiveness. These are
+rebuildable from the snapshot artifacts—not authoritative history. Filename
 timestamps follow patterns such as
 `Entra_Users_Properties_20260610-041113.csv`.
 
@@ -144,12 +186,15 @@ compatibility, reliability, and maintenance.
 ## Test
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 tools/run_unittests_isolated.py
 ```
+
+Qt-heavy test modules run in separate Python processes to avoid cross-module
+state accumulation.
 
 Contributor checks:
 
 ```bash
 git diff --check
-python3 -m compileall diffasaurus tests run.py
+python3 -m compileall diffasaurus tests tools run.py
 ```
