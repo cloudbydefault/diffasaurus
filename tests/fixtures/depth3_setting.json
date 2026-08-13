@@ -1,0 +1,67 @@
+{
+  "id": "setting-depth3-001",
+  "settingInstance": {
+    "@odata.type": "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance",
+    "settingDefinitionId": "def-group-0",
+    "groupSettingCollectionValue": [
+      {
+        "children": [
+          {
+            "settingInstance": {
+              "@odata.type": "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance",
+              "settingDefinitionId": "def-group-1",
+              "groupSettingCollectionValue": [
+                {
+                  "children": [
+                    {
+                      "settingInstance": {
+                        "@odata.type": "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance",
+                        "settingDefinitionId": "def-group-2",
+                        "groupSettingCollectionValue": [
+                          {
+                            "children": [
+                              {
+                                "settingInstance": {
+                                  "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+                                  "settingDefinitionId": "def-choice-1"
+                                }
+                              },
+                              {
+                                "settingInstance": {
+                                  "@odata.type": "#microsoft.graph.deviceManagementConfigurationSimpleSettingInstance",
+                                  "settingDefinitionId": "def-simple-1"
+                                }
+                              },
+                              {
+                                "settingInstance": {
+                                  "@odata.type": "#microsoft.graph.deviceManagementConfigurationSimpleSettingInstance",
+                                  "settingDefinitionId": "def-simple-2"
+                                }
+                              },
+                              {
+                                "settingInstance": {
+                                  "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+                                  "settingDefinitionId": "def-choice-2"
+                                }
+                              },
+                              {
+                                "settingInstance": {
+                                  "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+                                  "settingDefinitionId": "def-choice-3"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
