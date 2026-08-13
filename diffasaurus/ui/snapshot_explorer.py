@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PyQt6.QtCore import QThreadPool, QTimer, Qt
+from PyQt6.QtCore import QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -22,12 +22,48 @@ from PyQt6.QtWidgets import (
 )
 
 from diffasaurus.core.dashboard_registry import get_dashboard_definition
+from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
+from diffasaurus.core.configuration_policies.integration import (
+    POLICY_SESSION_CACHE,
+    compact_policy_inventory_rows,
+    is_configuration_policy_family,
+    resolve_bundle_for_anchor,
+)
 from diffasaurus.core.report_history import ReportSnapshot
 from diffasaurus.models.csv_model import CsvTableModel, read_csv_table
 from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.dashboard_view import DashboardView
-from diffasaurus.ui.multi_column_filter import MultiColumnFilterDialog
+from diffasaurus.ui.configuration_policy_presentation import count_semantic_settings
+
+
+def load_policy_snapshot_payload(report_dir: Path, snapshot: ReportSnapshot):
+    descriptor = resolve_bundle_for_anchor(report_dir, snapshot)
+    if descriptor is None:
+        raise RuntimeError("Selected anchor does not resolve to a compatible policy bundle.")
+    normalized = POLICY_SESSION_CACHE.get_normalized(descriptor)
+    rows = compact_policy_inventory_rows(normalized)
+    headers = ["Name", "Platform", "Type", "Source"]
+    table_rows = [
+        [row["name"], row["platform"], row["policy_type"], row["source"]]
+        for row in rows
+    ]
+    stats = [
+        {
+            "section": "Overview",
+            "title": title,
+            "value": value,
+            "kind": "neutral",
+        }
+        for title, value in (
+            ("Policies", str(len(normalized.policies))),
+            ("Settings", str(count_semantic_settings(normalized))),
+            ("Assignments", str(sum(len(p.assignments) for p in normalized.policies))),
+            ("Export status", descriptor.export_status),
+            ("Normalization", normalized.normalization_status),
+        )
+    ]
+    return headers, table_rows, descriptor.path, rows, stats
 
 
 def load_snapshot_payload(path: Path):
@@ -63,12 +99,18 @@ def _parse_datetime(value: str):
 
 
 class SnapshotExplorer(QWidget):
+    open_configuration_policies_requested = pyqtSignal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.model = CsvTableModel()
         self.proxy = CsvFilterProxy(self)
         self.proxy.setSourceModel(self.model)
         self.snapshots: list[ReportSnapshot] = []
+        self._family = ""
+        self._report_dir: Path | None = None
+        self._policy_snapshot_path: str | None = None
+        self._policy_rows: list[dict[str, str]] = []
         self.loaded_path: Path | None = None
         self._filters: dict = {}
         self._generation = 0
@@ -183,6 +225,29 @@ class SnapshotExplorer(QWidget):
         self.filter_button.clicked.connect(self.open_filter)
         self.clear_button.clicked.connect(self.clear_filters)
         self.dashboard.apply_filter_requested.connect(self.apply_dashboard_filter)
+        self.open_policy_button = QPushButton("Open in Configuration policies")
+        self.open_policy_button.setObjectName("primaryButton")
+        self.open_policy_button.hide()
+        self.open_policy_button.clicked.connect(self._emit_open_configuration_policies)
+        footer.addWidget(self.open_policy_button)
+
+    def set_report_dir(self, report_dir: Path):
+        self._report_dir = report_dir
+
+    def set_family(self, family: str):
+        self._family = family
+        policy_mode = is_configuration_policy_family(family)
+        self.dashboard_button.setVisible(not policy_mode)
+        self.filter_button.setVisible(not policy_mode)
+        self.search_mode.setVisible(not policy_mode)
+        self.search.setVisible(not policy_mode)
+        self.open_policy_button.setVisible(policy_mode)
+        if policy_mode:
+            self.table_button.setText("▦  Policy snapshot")
+            self.table_button.setChecked(True)
+            self.show_view(0)
+        else:
+            self.table_button.setText("▦  Table")
 
     def set_snapshots(self, snapshots: list[ReportSnapshot]):
         selected_path = self.snapshot_combo.currentData()
@@ -241,6 +306,18 @@ class SnapshotExplorer(QWidget):
         self.snapshot_combo.setEnabled(False)
         self.filter_button.setEnabled(False)
         self.status.setText(f"Loading {snapshot.path.name} without blocking the app…")
+        if is_configuration_policy_family(self._family) and self._report_dir is not None:
+            task = BackgroundCall(load_policy_snapshot_payload, self._report_dir, snapshot)
+            self._tasks.add(task)
+            task.signals.succeeded.connect(
+                lambda payload: self._policy_snapshot_loaded(generation, snapshot, payload)
+            )
+            task.signals.failed.connect(
+                lambda message: self._snapshot_failed(generation, message)
+            )
+            task.signals.done.connect(lambda: self._tasks.discard(task))
+            self.thread_pool.start(task)
+            return
         task = BackgroundCall(load_snapshot_payload, snapshot.path)
         self._tasks.add(task)
         task.signals.succeeded.connect(
@@ -266,6 +343,35 @@ class SnapshotExplorer(QWidget):
         self.filter_button.setEnabled(bool(headers))
         self.status.setText(
             f"{len(rows):,} rows · {len(headers):,} columns · {snapshot.path.name}"
+        )
+
+    def _policy_snapshot_loaded(self, generation: int, snapshot: ReportSnapshot, payload):
+        if generation != self._generation:
+            return
+        headers, rows, bundle_path, policy_rows, stats = payload
+        self.model.set_table(headers, rows, ",")
+        self.loaded_path = snapshot.path
+        self._policy_snapshot_path = bundle_path
+        self._policy_rows = policy_rows
+        self.proxy.setFilterFixedString("")
+        self.progress.hide()
+        self.snapshot_combo.setEnabled(True)
+        self.filter_button.setEnabled(False)
+        self.status.setText(
+            f"Policy bundle · {len(policy_rows)} policies · {snapshot.path.name}"
+        )
+        self.dashboard.build_dashboard("Policy snapshot", stats or [])
+
+    def _emit_open_configuration_policies(self):
+        policy_key = None
+        selected = self.table.selectionModel().selectedRows()
+        if selected:
+            row = selected[0].row()
+            if 0 <= row < len(self._policy_rows):
+                policy_key = self._policy_rows[row].get("policy_key")
+        self.open_configuration_policies_requested.emit(
+            self._policy_snapshot_path or "",
+            policy_key,
         )
 
     def _snapshot_failed(self, generation: int, message: str):

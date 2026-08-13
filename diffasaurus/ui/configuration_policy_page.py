@@ -35,7 +35,14 @@ from diffasaurus.core.configuration_policies import (
     select_previous_snapshot,
 )
 from diffasaurus.core.configuration_policies.comparison_models import SnapshotDescriptor
+from diffasaurus.core.configuration_policies.integration import (
+    POLICY_SESSION_CACHE,
+    classify_trust_banner,
+    legacy_configuration_policy_diagnostics,
+    resolve_group_display_name,
+)
 from diffasaurus.core.configuration_policies.models import NormalizedPolicy
+from diffasaurus.core.configuration_policies.history import _parse_captured_at_utc
 from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.configuration_policy_presentation import (
     CHANGE_STATE_LABELS,
@@ -95,6 +102,12 @@ def load_configuration_policy_session(
     if snapshots:
         if snapshot_path:
             selected = next((item for item in snapshots if item.path == snapshot_path), None)
+            if selected is None:
+                anchor_stem = Path(snapshot_path).stem
+                selected = next(
+                    (item for item in snapshots if item.snapshot_id == anchor_stem),
+                    None,
+                )
         if selected is None:
             selected = snapshots[-1]
 
@@ -118,6 +131,7 @@ def load_configuration_policy_session(
     model = build_page_model(
         snapshots=snapshots,
         diagnostics_count=len(discovery.diagnostics),
+        legacy_export_count=legacy_configuration_policy_diagnostics(discovery.diagnostics),
         selected=selected,
         previous=previous,
         normalized=normalized,
@@ -418,6 +432,7 @@ class ConfigurationPolicyPage(QWidget):
 
     def invalidate(self) -> None:
         self._generation += 1
+        POLICY_SESSION_CACHE.invalidate(self._report_dir)
         self._session_cache.clear()
         self._model = None
         self._selected_policy_key = None
@@ -446,6 +461,29 @@ class ConfigurationPolicyPage(QWidget):
         self._report_dir = report_dir
         if self.isVisible():
             self._start_load(None)
+
+    def open_snapshot(
+        self,
+        report_dir: Path,
+        snapshot_path: str | None = None,
+        *,
+        policy_key: str | None = None,
+    ) -> None:
+        if policy_key:
+            self._selected_policy_key = policy_key
+        if self._report_dir != report_dir:
+            self._report_dir = report_dir
+            self.invalidate()
+        self._report_dir = report_dir
+        self._start_load(snapshot_path)
+
+    def open_policy(
+        self,
+        report_dir: Path,
+        policy_key: str,
+        snapshot_path: str | None = None,
+    ) -> None:
+        self.open_snapshot(report_dir, snapshot_path, policy_key=policy_key)
 
     def _start_load(self, snapshot_path: str | None) -> None:
         if self._report_dir is None:
@@ -506,12 +544,21 @@ class ConfigurationPolicyPage(QWidget):
 
         if not model.snapshots:
             self.body_stack.setCurrentIndex(0)
+            message = (
+                "No Configuration Policy snapshots found in this report source.\n\n"
+                "Ensure the Configuration Policy exporter has produced a compatible snapshot bundle."
+            )
+            if model.legacy_export_count:
+                message += (
+                    "\n\nLegacy Configuration Policy export detected. "
+                    "Run the current Configuration Policy exporter to create a compatible snapshot."
+                )
             if model.discovery_diagnostics_count:
-                self.empty_state.setText(
-                    "No readable Configuration Policy snapshots found in this report source.\n\n"
-                    f"{model.discovery_diagnostics_count} snapshot"
+                message += (
+                    f"\n\n{model.discovery_diagnostics_count} snapshot"
                     f"{'s' if model.discovery_diagnostics_count != 1 else ''} could not be read."
                 )
+            self.empty_state.setText(message)
             self._clear_detail()
             return
 
@@ -544,27 +591,22 @@ class ConfigurationPolicyPage(QWidget):
         if not model.selected_snapshot or not model.normalized:
             self.trust_banner.hide()
             return
-        export_status = model.selected_snapshot.export_status
-        norm_status = model.normalized.normalization_status
-        if export_status == "complete" and norm_status == "success":
-            self.trust_banner.setText("Snapshot complete · normalization successful")
-            self.trust_banner.setStyleSheet(f"color:{COLORS['green']};")
-            self.trust_banner.show()
-        elif export_status == "incomplete" or norm_status == "partial":
-            self.trust_banner.setText(
-                "Snapshot or normalization coverage is partial. Policies shown were faithfully "
-                "captured where available, but overall trust is limited."
-            )
-            self.trust_banner.setStyleSheet(f"color:{COLORS['amber']};")
-            self.trust_banner.show()
-        elif export_status == "integrity_error" or norm_status == "error":
-            self.trust_banner.setText(
-                "Snapshot integrity or normalization error detected. Review coverage before trusting changes."
-            )
-            self.trust_banner.setStyleSheet(f"color:{COLORS['red']};")
-            self.trust_banner.show()
-        else:
-            self.trust_banner.hide()
+        presentation = classify_trust_banner(
+            model.selected_snapshot.export_status,
+            model.normalized,
+        )
+        text = presentation.headline
+        if presentation.detail:
+            text = f"{presentation.headline} {presentation.detail}"
+        color = {
+            "success": COLORS["green"],
+            "informational": COLORS["blue"],
+            "warning": COLORS["amber"],
+            "error": COLORS["red"],
+        }[presentation.level]
+        self.trust_banner.setText(text)
+        self.trust_banner.setStyleSheet(f"color:{color};")
+        self.trust_banner.show()
 
     def _update_summary_cards(self, model: ConfigurationPolicyPageModel) -> None:
         self.card_policies.set_data(str(model.policy_count), "normalized policies")
@@ -883,15 +925,33 @@ class ConfigurationPolicyPage(QWidget):
         assignments = policy.assignments
         self.assignments_table.setRowCount(len(assignments))
         filters_by_id = self._model.filter_by_id if self._model else {}
+        captured_at = None
+        if self._model and self._model.selected_snapshot:
+            captured_at = _parse_captured_at_utc(self._model.selected_snapshot.captured_at_utc)
         for row_index, assignment in enumerate(assignments):
             target = assignment_target_label(assignment.target_kind)
             group = "—"
             if assignment.target_kind in {"include_group", "exclude_group"}:
-                group = assignment.group_id or "—"
+                group_id = assignment.group_id or "—"
+                if (
+                    group_id != "—"
+                    and captured_at is not None
+                    and self._report_dir is not None
+                ):
+                    group = resolve_group_display_name(
+                        self._report_dir,
+                        group_id,
+                        captured_at,
+                    )
+                else:
+                    group = group_id
             filter_name, _ = resolve_filter_presentation(assignment.filter_id, filters_by_id)
             mode = filter_mode_label(assignment.filter_type)
+            group_item = QTableWidgetItem(group)
+            if assignment.group_id and group != assignment.group_id:
+                group_item.setToolTip(assignment.group_id)
             self.assignments_table.setItem(row_index, 0, QTableWidgetItem(target))
-            self.assignments_table.setItem(row_index, 1, QTableWidgetItem(group))
+            self.assignments_table.setItem(row_index, 1, group_item)
             self.assignments_table.setItem(row_index, 2, QTableWidgetItem(filter_name))
             self.assignments_table.setItem(row_index, 3, QTableWidgetItem(mode))
         self.assignments_empty.setVisible(not assignments)

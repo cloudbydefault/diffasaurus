@@ -34,6 +34,13 @@ from diffasaurus.core.powershell_runtime import (
     select_powershell_runtime,
     selected_powershell_runtime,
 )
+from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
+from diffasaurus.core.configuration_policies.integration import (
+    anchor_bundle_status,
+    discovery_index,
+    legacy_configuration_policy_diagnostics,
+)
+from diffasaurus.core.configuration_policies.history import discover_policy_snapshots
 from diffasaurus.core.report_history import expected_business_days, scan_report_index
 from diffasaurus.core.settings import get_active_reports_dir
 from diffasaurus.ui.background import BackgroundCall
@@ -84,6 +91,10 @@ REPORT_CATALOG = {
     "_app_INTUNE_Android_Devices.ps1": (
         "📱", "INTUNE · Android devices", "Android inventory and security posture",
         "Intune_Android_Devices",
+    ),
+    "app_INTUNE_ConfigurationPolicy.ps1": (
+        "⚙", "INTUNE · Configuration policies", "Settings, assignments and policy history",
+        CONFIGURATION_POLICY_FAMILY,
     ),
     "app_EXCHANGE_SharedMailboxes_Report.ps1": (
         "📬", "EXCHANGE · Shared mailboxes", "Permissions and activity",
@@ -217,6 +228,9 @@ class RunScriptsDialog(QDialog):
             history = scan_report_index(self.report_dir)
         except Exception:
             history = {}
+        policy_discovery = discover_policy_snapshots(self.report_dir)
+        policy_index = discovery_index(self.report_dir)
+        legacy_count = legacy_configuration_policy_diagnostics(policy_discovery.diagnostics)
         expected_day = expected_business_days(count=1)[0]
         missing_count = 0
         for filename, (icon, title, description, family) in REPORT_CATALOG.items():
@@ -224,13 +238,33 @@ class RunScriptsDialog(QDialog):
             if not path:
                 continue
             snapshots = history.get(family, [])
-            latest = snapshots[-1].captured_at if snapshots else None
-            missing = latest is None or latest.date() < expected_day
-            missing_count += int(missing)
-            if missing:
-                evidence = f"⚠ Missing {expected_day:%d %b %Y}"
+            latest = snapshots[-1] if snapshots else None
+            if family == CONFIGURATION_POLICY_FAMILY:
+                healthy, note = anchor_bundle_status(
+                    self.report_dir,
+                    family,
+                    latest,
+                    index=policy_index,
+                    legacy_count=legacy_count,
+                )
+                missing = not healthy or latest is None or latest.captured_at.date() < expected_day
+                missing_count += int(missing)
+                if latest is None:
+                    evidence = f"⚠ Missing {expected_day:%d %b %Y}"
+                elif note:
+                    evidence = f"{note} · {latest:%d %b %Y · %H:%M}"
+                elif latest.captured_at.date() < expected_day:
+                    evidence = f"⚠ Missing {expected_day:%d %b %Y}"
+                else:
+                    evidence = f"✓ Latest {latest:%d %b %Y · %H:%M}"
             else:
-                evidence = f"✓ Latest {latest:%d %b %Y · %H:%M}"
+                latest_time = latest.captured_at if latest else None
+                missing = latest_time is None or latest_time.date() < expected_day
+                missing_count += int(missing)
+                if missing:
+                    evidence = f"⚠ Missing {expected_day:%d %b %Y}"
+                else:
+                    evidence = f"✓ Latest {latest_time:%d %b %Y · %H:%M}"
             item = QListWidgetItem(
                 f"{icon}  {title}     {evidence}\n"
                 f"     {description}\n"
