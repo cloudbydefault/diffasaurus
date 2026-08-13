@@ -13,10 +13,12 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
 from diffasaurus.core.report_history import (
     REASON_NO_BASELINE,
     ComparisonSummary,
@@ -83,6 +85,7 @@ class SummaryCard(QFrame):
 class FamilyChangeSection(QFrame):
     details_requested = pyqtSignal(str)
     open_in_compare_requested = pyqtSignal(str, object, object, str)
+    open_configuration_policies_requested = pyqtSignal(str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,6 +93,7 @@ class FamilyChangeSection(QFrame):
         self._family = ""
         self._status: FamilyChangeStatus | None = None
         self._details: ComparisonSummary | None = None
+        self._semantic_details: tuple[dict[str, str], ...] = ()
         self._filter = "All"
         self._expanded = False
 
@@ -197,6 +201,11 @@ class FamilyChangeSection(QFrame):
             self.status_badge.setStyleSheet(
                 f"color: {COLORS['green']}; font-size: 11px; font-weight: 700;"
             )
+        elif item.status == "partial":
+            self.status_badge.setText("Partial / indeterminate")
+            self.status_badge.setStyleSheet(
+                f"color: {COLORS['amber']}; font-size: 11px; font-weight: 700;"
+            )
         elif item.status == "unchanged":
             self.status_badge.setText("No changes")
             self.status_badge.setStyleSheet(
@@ -208,7 +217,14 @@ class FamilyChangeSection(QFrame):
                 f"color: {COLORS['amber']}; font-size: 11px; font-weight: 700;"
             )
 
-        if item.summary:
+        if item.policy_summary is not None:
+            self.counts_label.setText(item.policy_summary.count_text)
+            if item.partial_coverage:
+                self.counts_label.setText(
+                    f"{item.policy_summary.count_text} · partial coverage"
+                )
+            self.counts_label.show()
+        elif item.summary:
             if item.family == "Entra_Group_User_Memberships":
                 self.counts_label.setText(
                     f"{item.summary.added} memberships added · "
@@ -230,7 +246,7 @@ class FamilyChangeSection(QFrame):
             coverage_parts.append(f"Baseline: {item.baseline.label}")
         elif item.latest:
             coverage_parts.append(f"Latest on disk: {item.latest.label}")
-        if item.latest and (show_baseline or item.status in {"changed", "unchanged"}):
+        if item.latest and (show_baseline or item.status in {"changed", "unchanged", "partial"}):
             coverage_parts.append(f"Latest: {item.latest.label}")
         self.coverage_label.setText("  ·  ".join(coverage_parts))
 
@@ -240,13 +256,18 @@ class FamilyChangeSection(QFrame):
         else:
             self.reason_label.hide()
 
-        comparable = item.status in {"changed", "unchanged"} and item.baseline and item.latest
+        comparable = item.status in {"changed", "unchanged", "partial"} and item.baseline and item.latest
         self.compare_button.setEnabled(bool(comparable))
+        if item.family == CONFIGURATION_POLICY_FAMILY:
+            self.compare_button.setText("Open Configuration policies")
+        else:
+            self.compare_button.setText("Open in Compare")
         self.toggle_button.setEnabled(bool(comparable))
         self.toggle_button.setVisible(bool(comparable))
         configure_comparison_detail_table(self.detail_table, item.family)
+        self._semantic_details = item.semantic_details
 
-        if comparable and self._details:
+        if comparable and (self._details or self._semantic_details):
             self._apply_detail_filters()
         else:
             self.details_panel.hide()
@@ -261,6 +282,13 @@ class FamilyChangeSection(QFrame):
     def _emit_open_in_compare(self):
         if not self._status or not self._status.baseline or not self._status.latest:
             return
+        if self._status.family == CONFIGURATION_POLICY_FAMILY:
+            self.open_configuration_policies_requested.emit(
+                self._family,
+                self._status.policy_target_descriptor,
+                None,
+            )
+            return
         self.open_in_compare_requested.emit(
             self._family,
             self._status.baseline,
@@ -274,10 +302,23 @@ class FamilyChangeSection(QFrame):
         self._expanded = not self._expanded
         self.toggle_button.setText("Hide details" if self._expanded else "Show details")
         self.details_panel.setVisible(self._expanded)
-        if self._expanded and self._details is None:
+        if self._expanded and self._details is None and not self._semantic_details:
             self.details_requested.emit(self._family)
         elif self._expanded:
             self._apply_detail_filters()
+
+    def _populate_semantic_detail_table(self, rows: list[dict[str, str]]) -> None:
+        self.detail_table.setRowCount(len(rows))
+        for row_index, detail in enumerate(rows):
+            values = (
+                detail.get("Change", ""),
+                detail.get("Identity", ""),
+                detail.get("Property", ""),
+                detail.get("Before", ""),
+                detail.get("After", ""),
+            )
+            for column, value in enumerate(values):
+                self.detail_table.setItem(row_index, column, QTableWidgetItem(value))
 
     def _set_filter(self, value: str):
         self._filter = value
@@ -286,30 +327,59 @@ class FamilyChangeSection(QFrame):
         self._apply_detail_filters()
 
     def _apply_detail_filters(self):
-        if not self._details:
+        if not self._details and not self._semantic_details:
             self.detail_table.setRowCount(0)
             self.detail_notice.hide()
             return
         needle = self.detail_search.text().strip().lower()
         matching: list[dict[str, str]] = []
         has_more = False
-        for detail in self._details.details:
-            if self._filter != "All" and detail["change"] != self._filter:
+        source_details = (
+            self._semantic_details
+            if self._semantic_details
+            else (self._details.details if self._details else ())
+        )
+        if source_details and source_details[0].get("event_type"):
+            from diffasaurus.ui.configuration_policy_presentation import (
+                semantic_event_details_to_display_rows,
+            )
+
+            source_details = semantic_event_details_to_display_rows(source_details)
+        for detail in source_details:
+            change_value = detail.get("Change") or detail.get("change", "")
+            if self._filter != "All" and change_value != self._filter:
                 continue
-            if needle and needle not in " ".join(detail.values()).lower():
+            if needle and needle not in " ".join(str(value) for value in detail.values()).lower():
                 continue
             if len(matching) >= DETAIL_TABLE_LIMIT:
                 has_more = True
                 break
-            matching.append(detail)
+            if "change" in detail and "Change" not in detail:
+                matching.append(
+                    {
+                        "Change": detail.get("change", ""),
+                        "Identity": detail.get("identity", ""),
+                        "Property": detail.get("property", ""),
+                        "Before": detail.get("before", ""),
+                        "After": detail.get("after", ""),
+                    }
+                )
+            else:
+                matching.append(detail)
 
-        configure_comparison_detail_table(self.detail_table, self._family)
-        populate_comparison_detail_table(
-            self.detail_table,
-            matching,
-            family=self._family,
-            default_text_color=COLORS["text"],
+        use_semantic_layout = bool(self._semantic_details) or any(
+            "Change" in detail for detail in matching
         )
+        if use_semantic_layout:
+            self._populate_semantic_detail_table(matching)
+        else:
+            configure_comparison_detail_table(self.detail_table, self._family)
+            populate_comparison_detail_table(
+                self.detail_table,
+                matching,
+                family=self._family,
+                default_text_color=COLORS["text"],
+            )
         if has_more:
             self.detail_notice.setText(
                 f"Showing the first {DETAIL_TABLE_LIMIT:,} matching details for speed. "
@@ -324,6 +394,7 @@ class RecentChangesPage(QWidget):
     period_changed = pyqtSignal(object, str)
     details_requested = pyqtSignal(str, object, object, str)
     open_in_compare_requested = pyqtSignal(str, object, object, str)
+    open_configuration_policies_requested = pyqtSignal(str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -446,6 +517,9 @@ class RecentChangesPage(QWidget):
             section.apply_status(family_status, report.cutoff)
             section.details_requested.connect(self._on_details_requested)
             section.open_in_compare_requested.connect(self.open_in_compare_requested.emit)
+            section.open_configuration_policies_requested.connect(
+                self.open_configuration_policies_requested.emit
+            )
             self._sections[family_status.family] = section
             self.sections_layout.insertWidget(
                 self.sections_layout.count() - 1,
@@ -456,6 +530,13 @@ class RecentChangesPage(QWidget):
         section = self._sections.get(family)
         if section:
             section.set_details(summary)
+
+    def set_family_semantic_details(self, family: str, details: tuple[dict[str, str], ...]):
+        section = self._sections.get(family)
+        if section:
+            section._semantic_details = details
+            if section._expanded:
+                section._apply_detail_filters()
 
     def _on_details_requested(self, family: str):
         section = self._sections.get(family)

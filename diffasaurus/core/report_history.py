@@ -142,12 +142,18 @@ class PeriodPairResult:
 @dataclass(frozen=True)
 class FamilyChangeStatus:
     family: str
-    status: Literal["changed", "unchanged", "no_data"]
+    status: Literal["changed", "unchanged", "no_data", "partial"]
     baseline: ReportSnapshot | None
     latest: ReportSnapshot | None
     key_column: str
     summary: ComparisonSummary | None
     reason: str
+    policy_summary: object | None = None
+    semantic_details: tuple[dict[str, str], ...] = ()
+    partial_coverage: bool = False
+    policy_comparison: object | None = None
+    policy_baseline_descriptor: object | None = None
+    policy_target_descriptor: object | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +197,7 @@ class FamilyRunHealth:
     late: int
     latest: datetime | None
     days: tuple[tuple[date, ReportSnapshot | None], ...]
+    attention: int = 0
 
     @property
     def coverage(self) -> float:
@@ -200,6 +207,8 @@ class FamilyRunHealth:
     def status(self) -> str:
         if not self.expected:
             return "No schedule window"
+        if self.attention:
+            return "Attention"
         if not self.missing and not self.late:
             return "Healthy"
         if not self.missing:
@@ -326,7 +335,13 @@ def report_run_health(
     business_day_count: int = 10,
     scheduled_hour: int = 1,
     grace_hours: int = 6,
+    report_dir: Path | str | None = None,
 ) -> list[FamilyRunHealth]:
+    from diffasaurus.core.configuration_policies.integration import (
+        is_configuration_policy_family,
+        policy_run_health_observation,
+    )
+
     days = expected_business_days(reference, business_day_count, scheduled_hour)
     health: list[FamilyRunHealth] = []
     for family, snapshots in families.items():
@@ -337,13 +352,34 @@ def report_run_health(
             if current is None or snapshot.captured_at > current.captured_at:
                 snapshots_by_day[captured_day] = snapshot
 
-        observations = tuple((day, snapshots_by_day.get(day)) for day in days)
-        observed = sum(snapshot is not None for _, snapshot in observations)
-        late = sum(
-            snapshot is not None
-            and snapshot.captured_at.time() > time(min(scheduled_hour + grace_hours, 23), 0)
-            for _, snapshot in observations
-        )
+        raw_observations = tuple((day, snapshots_by_day.get(day)) for day in days)
+        policy_mode = is_configuration_policy_family(family) and report_dir is not None
+        observations: list[tuple[date, ReportSnapshot | None]] = []
+        observed = 0
+        attention = 0
+        late = 0
+        for day, snapshot in raw_observations:
+            if snapshot is None:
+                observations.append((day, None))
+                continue
+            health_snapshot = snapshot
+            needs_attention = False
+            if policy_mode:
+                health_snapshot, needs_attention = policy_run_health_observation(
+                    report_dir,
+                    snapshot,
+                )
+            observations.append((day, health_snapshot))
+            if health_snapshot is None:
+                continue
+            observed += 1
+            if needs_attention:
+                attention += 1
+            if health_snapshot.captured_at.time() > time(
+                min(scheduled_hour + grace_hours, 23),
+                0,
+            ):
+                late += 1
         health.append(
             FamilyRunHealth(
                 family=family,
@@ -352,7 +388,8 @@ def report_run_health(
                 missing=len(days) - observed,
                 late=late,
                 latest=snapshots[-1].captured_at if snapshots else None,
-                days=observations,
+                days=tuple(observations),
+                attention=attention,
             )
         )
     return sorted(health, key=lambda item: (item.status == "Healthy", item.family.lower()))
@@ -785,6 +822,9 @@ def compare_snapshots(
     key_column: str,
     family: str | None = None,
 ) -> ComparisonSummary:
+    from diffasaurus.core.configuration_policies.integration import guard_generic_csv_comparison
+
+    guard_generic_csv_comparison(family or baseline.family)
     return _compare_snapshots(
         baseline,
         latest,
@@ -800,6 +840,9 @@ def compare_snapshot_counts(
     key_column: str,
     family: str | None = None,
 ) -> ComparisonSummary:
+    from diffasaurus.core.configuration_policies.integration import guard_generic_csv_comparison
+
+    guard_generic_csv_comparison(family or baseline.family)
     return _compare_snapshots(
         baseline,
         latest,
@@ -1286,7 +1329,22 @@ def family_change_status(
     period: timedelta,
     reference: datetime | None = None,
     include_details: bool = False,
+    report_dir: Path | str | None = None,
 ) -> FamilyChangeStatus:
+    from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
+    from diffasaurus.core.configuration_policies.integration import (
+        configuration_policy_family_change_status,
+    )
+
+    if family == CONFIGURATION_POLICY_FAMILY and report_dir is not None:
+        return configuration_policy_family_change_status(
+            report_dir,
+            snapshots,
+            period,
+            reference,
+            include_details=include_details,
+        )
+
     pairing = resolve_period_pair(snapshots, period, reference)
     if pairing.reason:
         return FamilyChangeStatus(
@@ -1349,8 +1407,8 @@ def family_change_status(
 
 
 def _recent_changes_sort_key(item: FamilyChangeStatus) -> tuple[int, str]:
-    status_rank = {"changed": 0, "unchanged": 1, "no_data": 2}
-    return status_rank.get(item.status, 3), item.family.lower()
+    status_rank = {"changed": 0, "partial": 1, "unchanged": 2, "no_data": 3}
+    return status_rank.get(item.status, 4), item.family.lower()
 
 
 def aggregate_recent_changes(
@@ -1360,6 +1418,7 @@ def aggregate_recent_changes(
     period_label: str = "",
     family_order: tuple[str, ...] | None = None,
     include_details: bool = False,
+    report_dir: Path | str | None = None,
 ) -> RecentChangesReport:
     reference_at, cutoff = period_window(period, reference)
     catalog = list(family_order or ())
@@ -1381,6 +1440,7 @@ def aggregate_recent_changes(
                 period,
                 reference=reference_at,
                 include_details=include_details,
+                report_dir=report_dir,
             )
         )
 

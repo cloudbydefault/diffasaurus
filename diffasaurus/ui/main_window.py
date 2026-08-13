@@ -56,6 +56,16 @@ from diffasaurus.core.report_history import (
     schema_changes,
     suggested_key,
 )
+from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
+from diffasaurus.core.configuration_policies.integration import (
+    POLICY_SESSION_CACHE,
+    build_policy_metric_history,
+    build_policy_movement,
+    is_configuration_policy_family,
+    resolve_bundle_for_anchor,
+    summarize_policy_comparison,
+)
+from diffasaurus.ui.configuration_policy_presentation import build_semantic_detail_rows
 from diffasaurus.core.paths import project_root
 from diffasaurus.core.settings import get_active_reports_dir
 from diffasaurus.ui.comparison_presentation import (
@@ -212,6 +222,27 @@ def analyze_family(
     return title, history, movement, latest_summary, schema_changes(hydrated)
 
 
+def analyze_policy_family(
+    report_dir: Path,
+    snapshots: list[ReportSnapshot],
+    cancelled: threading.Event,
+    progress=None,
+    partial=None,
+):
+    title = CONFIGURATION_POLICY_FAMILY
+    history = build_policy_metric_history(report_dir, snapshots, cache=POLICY_SESSION_CACHE)
+    if cancelled.is_set():
+        return None
+    if progress:
+        progress(len(snapshots), len(snapshots), "Comparing policy snapshots")
+    movement, latest_summary = build_policy_movement(
+        report_dir,
+        snapshots,
+        cache=POLICY_SESSION_CACHE,
+    )
+    return title, history, movement, latest_summary, []
+
+
 class MetricCard(QFrame):
     def __init__(self, eyebrow: str, value: str = "—", detail: str = "", accent: str = "#8bd450"):
         super().__init__()
@@ -259,6 +290,8 @@ class DiffasaurusWindow(QMainWindow):
         self.current_history: list[tuple[ReportSnapshot, dict[str, float]]] = []
         self.current_schema_changes = []
         self.current_comparison: ComparisonSummary | None = None
+        self._policy_comparison = None
+        self._policy_comparison_rows: tuple[dict[str, str], ...] = ()
         self._comparison_family: str | None = None
         self.current_filter = "All"
         self.thread_pool = QThreadPool(self)
@@ -674,10 +707,17 @@ class DiffasaurusWindow(QMainWindow):
         self.baseline_combo = QComboBox()
         self.latest_combo = QComboBox()
         self.key_combo = QComboBox()
+        self.key_selector_group = QWidget()
+        key_group_layout = QVBoxLayout(self.key_selector_group)
+        key_group_layout.setContentsMargins(0, 0, 0, 0)
+        key_group_layout.setSpacing(4)
+        self.key_selector_label = QLabel("IDENTITY KEY")
+        self.key_selector_label.setObjectName("fieldLabel")
+        key_group_layout.addWidget(self.key_selector_label)
+        key_group_layout.addWidget(self.key_combo)
         for label, widget in (
             ("Baseline", self.baseline_combo),
             ("Latest", self.latest_combo),
-            ("Identity key", self.key_combo),
         ):
             group = QVBoxLayout()
             caption = QLabel(label.upper())
@@ -685,6 +725,7 @@ class DiffasaurusWindow(QMainWindow):
             group.addWidget(caption)
             group.addWidget(widget)
             selectors.addLayout(group, 1)
+        selectors.addWidget(self.key_selector_group, 1)
         self.compare_button = QPushButton("Compare")
         self.compare_button.setObjectName("primaryButton")
         self.compare_button.setMinimumHeight(42)
@@ -764,6 +805,9 @@ class DiffasaurusWindow(QMainWindow):
         self.recent_changes_page.period_changed.connect(self._refresh_recent_changes)
         self.recent_changes_page.details_requested.connect(self._load_recent_details)
         self.recent_changes_page.open_in_compare_requested.connect(self._open_recent_in_compare)
+        self.recent_changes_page.open_configuration_policies_requested.connect(
+            self._open_configuration_policies_from_recent
+        )
         self.entity_history_page.period_changed.connect(self._refresh_entity_period_changes)
         self.entity_history_page.entity_selected.connect(self._refresh_entity_period_changes)
         self.entity_history_page.refresh_requested.connect(
@@ -774,6 +818,9 @@ class DiffasaurusWindow(QMainWindow):
             lambda: self._ensure_entity_index(force=True, user_requested=True)
         )
         self.point_in_time_page.reconstruct_requested.connect(self._reconstruct_point_in_time)
+        self.snapshot_explorer.open_configuration_policies_requested.connect(
+            self._open_configuration_policies_from_explorer
+        )
 
     def show_page(self, index: int):
         for current, button in enumerate(self.nav_buttons):
@@ -1062,6 +1109,7 @@ class DiffasaurusWindow(QMainWindow):
     def refresh_history(self):
         selected = self.family_combo.currentText()
         self.report_dir = get_active_reports_dir()
+        POLICY_SESSION_CACHE.invalidate(self.report_dir)
         self.configuration_policy_page.invalidate()
         self._family_generation += 1
         self._family_cancelled.set()
@@ -1126,7 +1174,7 @@ class DiffasaurusWindow(QMainWindow):
         QMessageBox.warning(self, "Report indexing", message)
 
     def _refresh_run_health(self):
-        health = report_run_health(self.families, business_day_count=10)
+        health = report_run_health(self.families, business_day_count=10, report_dir=self.report_dir)
         total_expected = sum(item.expected for item in health)
         total_observed = sum(item.observed for item in health)
         total_missing = sum(item.missing for item in health)
@@ -1195,8 +1243,11 @@ class DiffasaurusWindow(QMainWindow):
         if current_metric and current_metric != "Analyzing snapshots…":
             self._preferred_metric = current_metric
         snapshots = self.families.get(self.family_combo.currentText(), [])
+        family = self.family_combo.currentText()
+        self.snapshot_explorer.set_family(family)
+        self.snapshot_explorer.set_report_dir(self.report_dir)
         self.snapshot_explorer.set_snapshots(snapshots)
-        if self.stack.currentIndex() == 7:
+        if self.stack.currentIndex() == PAGE_SNAPSHOT_EXPLORER:
             self.snapshot_explorer.activate()
         self._populate_library(snapshots)
         self._populate_snapshot_combos(snapshots)
@@ -1234,8 +1285,10 @@ class DiffasaurusWindow(QMainWindow):
         if not snapshots:
             return
         self._run_background(
-            analyze_family,
-            (snapshots, self._family_cancelled),
+            analyze_policy_family if is_configuration_policy_family(family) else analyze_family,
+            (self.report_dir, snapshots, self._family_cancelled)
+            if is_configuration_policy_family(family)
+            else (snapshots, self._family_cancelled),
             lambda payload: self._family_ready(generation, family, payload),
             lambda message: self._family_failed(generation, family, message),
             lambda current, total, label: (
@@ -1383,15 +1436,27 @@ class DiffasaurusWindow(QMainWindow):
             self.card_changes.set_data("—", "needs at least two comparable snapshots")
 
     def _populate_library(self, snapshots: list[ReportSnapshot]):
+        family = self.family_combo.currentText()
         self.library_table.setRowCount(len(snapshots))
         for row, snapshot in enumerate(reversed(snapshots)):
-            values = (
-                snapshot.label,
-                snapshot.captured_at.strftime("%Y-%m-%d %H:%M"),
-                f"{snapshot.row_count:,}" if snapshot.row_count >= 0 else "On demand",
-                str(len(snapshot.headers)) if snapshot.headers else "On demand",
-                snapshot.path.name,
-            )
+            if is_configuration_policy_family(family):
+                descriptor = resolve_bundle_for_anchor(self.report_dir, snapshot)
+                status = descriptor.export_status if descriptor else "missing"
+                values = (
+                    snapshot.label,
+                    snapshot.captured_at.strftime("%Y-%m-%d %H:%M"),
+                    "Policy bundle",
+                    status.replace("_", " ").title(),
+                    snapshot.path.name,
+                )
+            else:
+                values = (
+                    snapshot.label,
+                    snapshot.captured_at.strftime("%Y-%m-%d %H:%M"),
+                    f"{snapshot.row_count:,}" if snapshot.row_count >= 0 else "On demand",
+                    str(len(snapshot.headers)) if snapshot.headers else "On demand",
+                    snapshot.path.name,
+                )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, snapshot)
@@ -1403,7 +1468,11 @@ class DiffasaurusWindow(QMainWindow):
         snapshot = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(snapshot, ReportSnapshot):
             return
-        self.show_page(7)
+        if is_configuration_policy_family(snapshot.family):
+            self.show_page(PAGE_CONFIGURATION_POLICIES)
+            self.configuration_policy_page.open_snapshot(self.report_dir, str(snapshot.path))
+            return
+        self.show_page(PAGE_SNAPSHOT_EXPLORER)
         self.snapshot_explorer.select_snapshot(snapshot)
 
     def filter_library(self):
@@ -1433,8 +1502,12 @@ class DiffasaurusWindow(QMainWindow):
         latest = self.latest_combo.currentData()
         headers = common_headers(baseline, latest) if baseline and latest else []
         family = baseline.family if isinstance(baseline, ReportSnapshot) else None
+        policy_family = is_configuration_policy_family(family)
+        self.key_selector_group.setVisible(not policy_family)
         selected = self.key_combo.currentText()
         self.key_combo.clear()
+        if policy_family:
+            return
         key_options = list(headers)
         composite_label = composite_key_label(family, headers)
         if composite_label and composite_label not in key_options:
@@ -1455,9 +1528,33 @@ class DiffasaurusWindow(QMainWindow):
         generation = self._comparison_generation
         self.compare_button.setEnabled(False)
         self.compare_button.setText("Comparing…")
-        self._show_progress(0, 0, "Comparing two CSV snapshots…")
         family = baseline.family if isinstance(baseline, ReportSnapshot) else None
         self._comparison_family = family
+        if is_configuration_policy_family(family):
+            baseline_bundle = resolve_bundle_for_anchor(self.report_dir, baseline)
+            latest_bundle = resolve_bundle_for_anchor(self.report_dir, latest)
+            if baseline_bundle is None or latest_bundle is None:
+                QMessageBox.warning(
+                    self,
+                    "Compare snapshots",
+                    "Selected policy anchors do not resolve to compatible snapshot bundles.",
+                )
+                self.compare_button.setEnabled(True)
+                self.compare_button.setText("Compare")
+                return
+            self._show_progress(0, 0, "Comparing policy snapshots semantically…")
+
+            def _compare_policy():
+                return POLICY_SESSION_CACHE.compare(baseline_bundle, latest_bundle)
+
+            self._run_background(
+                _compare_policy,
+                (),
+                lambda comparison: self._policy_comparison_ready(generation, comparison),
+                lambda message: self._comparison_failed(generation, message),
+            )
+            return
+        self._show_progress(0, 0, "Comparing two CSV snapshots…")
         self._run_background(
             compare_snapshots,
             (baseline, latest, self.key_combo.currentText(), family),
@@ -1465,10 +1562,60 @@ class DiffasaurusWindow(QMainWindow):
             lambda message: self._comparison_failed(generation, message),
         )
 
+    def _policy_comparison_ready(self, generation: int, comparison):
+        if generation != self._comparison_generation:
+            return
+        self._policy_comparison = comparison
+        self.current_comparison = None
+        self._comparison_family = CONFIGURATION_POLICY_FAMILY
+        summary = summarize_policy_comparison(comparison)
+        self.compare_button.setEnabled(True)
+        self.compare_button.setText("Compare")
+        self._hide_progress()
+        self.compare_cards["Added"].set_data(f"{summary.added:,}", "policies")
+        self.compare_cards["Removed"].set_data(f"{summary.removed:,}", "policies")
+        self.compare_cards["Changed"].set_data(f"{summary.modified:,}", "policies")
+        self.compare_cards["Stable"].set_data(f"{summary.unchanged:,}", "policies")
+        self.diff_table.setColumnCount(5)
+        self.diff_table.setHorizontalHeaderLabels(
+            ("Change", "Policy", "Component", "Before", "After")
+        )
+        rows = build_semantic_detail_rows(comparison)
+        self._policy_comparison_rows = rows
+        if comparison.comparison_status == "partial":
+            self.diff_notice.setText(
+                f"Partial comparison coverage · {summary.indeterminate} indeterminate · "
+                f"{summary.suppression_count} suppressions"
+            )
+            self.diff_notice.setStyleSheet(f"color:{COLORS['amber']}; font-size:11px;")
+            self.diff_notice.show()
+        elif summary.suppression_count:
+            self.diff_notice.setText(f"{summary.suppression_count} suppressions recorded")
+            self.diff_notice.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
+            self.diff_notice.show()
+        else:
+            self.diff_notice.hide()
+        self._populate_policy_comparison_table(rows)
+        self.set_change_filter("All")
+
+    def _populate_policy_comparison_table(self, rows: tuple[dict[str, str], ...]):
+        self.diff_table.setRowCount(len(rows))
+        for row_index, detail in enumerate(rows):
+            values = (
+                detail.get("Change", ""),
+                detail.get("Identity", ""),
+                detail.get("Property", ""),
+                detail.get("Before", ""),
+                detail.get("After", ""),
+            )
+            for column, value in enumerate(values):
+                self.diff_table.setItem(row_index, column, QTableWidgetItem(value))
+
     def _comparison_ready(self, generation: int, summary: ComparisonSummary):
         if generation != self._comparison_generation:
             return
         self.current_comparison = summary
+        self._policy_comparison = None
         self.compare_button.setEnabled(True)
         self.compare_button.setText("Compare")
         self._hide_progress()
@@ -1722,6 +1869,7 @@ class DiffasaurusWindow(QMainWindow):
                 selected_period,
                 period_label=period_label,
                 family_order=CATALOG_FAMILY_ORDER,
+                report_dir=str(self.report_dir),
             ),
             (self.families, period, label),
             lambda report: self._recent_changes_ready(generation, report),
@@ -1739,6 +1887,21 @@ class DiffasaurusWindow(QMainWindow):
         QMessageBox.warning(self, "Recent changes", message)
 
     def _load_recent_details(self, family: str, baseline, latest, key_column: str):
+        if is_configuration_policy_family(family):
+            section = self.recent_changes_page._sections.get(family)
+            status = section._status if section else None
+            if (
+                status
+                and status.policy_baseline_descriptor is not None
+                and status.policy_target_descriptor is not None
+            ):
+                comparison = POLICY_SESSION_CACHE.compare(
+                    status.policy_baseline_descriptor,
+                    status.policy_target_descriptor,
+                )
+                rows = build_semantic_detail_rows(comparison)
+                self.recent_changes_page.set_family_semantic_details(family, rows)
+            return
         self._recent_detail_generation += 1
         generation = self._recent_detail_generation
         self._run_background(
@@ -1765,6 +1928,9 @@ class DiffasaurusWindow(QMainWindow):
         latest: ReportSnapshot,
         key_column: str,
     ):
+        if is_configuration_policy_family(family):
+            self._open_configuration_policies_from_recent(family, latest, None)
+            return
         if family in self.families:
             self.family_combo.setCurrentText(family)
         self.show_page(6)
@@ -1772,6 +1938,30 @@ class DiffasaurusWindow(QMainWindow):
         self._select_snapshot_in_combo(self.latest_combo, latest)
         self.key_combo.setCurrentText(key_column)
         self.run_comparison()
+
+    def _open_configuration_policies_from_recent(
+        self,
+        family: str,
+        target_descriptor,
+        policy_key: str | None,
+    ):
+        snapshot_path = None
+        if target_descriptor is not None:
+            snapshot_path = getattr(target_descriptor, "path", None)
+        self.show_page(PAGE_CONFIGURATION_POLICIES)
+        self.configuration_policy_page.open_snapshot(
+            self.report_dir,
+            snapshot_path,
+            policy_key=policy_key,
+        )
+
+    def _open_configuration_policies_from_explorer(self, snapshot_path: str, policy_key):
+        self.show_page(PAGE_CONFIGURATION_POLICIES)
+        self.configuration_policy_page.open_snapshot(
+            self.report_dir,
+            snapshot_path or None,
+            policy_key=policy_key if isinstance(policy_key, str) else None,
+        )
 
     @staticmethod
     def _select_snapshot_in_combo(combo: QComboBox, snapshot: ReportSnapshot):
@@ -1791,6 +1981,19 @@ class DiffasaurusWindow(QMainWindow):
         self.apply_change_filters()
 
     def apply_change_filters(self):
+        if self._policy_comparison is not None and is_configuration_policy_family(self._comparison_family):
+            needle = self.change_search.text().strip().lower()
+            rows = getattr(self, "_policy_comparison_rows", ())
+            matching = []
+            for detail in rows:
+                change = detail.get("Change", "")
+                if self.current_filter != "All" and change != self.current_filter:
+                    continue
+                if needle and needle not in " ".join(detail.values()).lower():
+                    continue
+                matching.append(detail)
+            self._populate_policy_comparison_table(tuple(matching))
+            return
         if not self.current_comparison:
             self.diff_table.setRowCount(0)
             self.diff_notice.hide()

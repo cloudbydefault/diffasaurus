@@ -53,6 +53,14 @@ read-only; it does not modify your tenant or require a cloud backend.
 
 **Fossil library** — Searchable list of snapshot files in the active report source.
 
+**Configuration policies** — Dedicated Intune policy investigation from rich Phase 0
+snapshot bundles (settings, assignments, coverage, and semantic history). Generate
+reports can run the Configuration Policy exporter; it writes both an anchor CSV and
+a compatible bundle directory. Recent Changes, Compare, Dig site, Fossil Library,
+and Snapshot Explorer use semantic policy comparison—not generic CSV row diff—for
+`Intune_ConfigurationPolicies`. Legacy pre-bundle exports are detected but not
+automatically upgraded or trusted. Investigation is read-only; no live Graph calls.
+
 ## Point-in-Time
 
 Select an entity and target date, then **Reconstruct**. Diffasaurus uses the

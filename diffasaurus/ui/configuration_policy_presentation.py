@@ -114,6 +114,7 @@ class ConfigurationPolicyPageModel:
     previous_snapshot: SnapshotDescriptor | None
     normalized: NormalizedSnapshot | None
     comparison: ConfigurationPolicyComparison | None
+    legacy_export_count: int = 0
     normalization_error: str | None = None
     comparison_error: str | None = None
     policy_diff_by_key: dict[str, PolicyDiff] = field(default_factory=dict)
@@ -412,10 +413,36 @@ def policy_events(
     return list(diff.changes)
 
 
+def build_semantic_detail_rows(
+    comparison: ConfigurationPolicyComparison,
+) -> tuple[dict[str, str], ...]:
+    from diffasaurus.core.configuration_policies.integration import build_semantic_event_details
+
+    return semantic_event_details_to_display_rows(build_semantic_event_details(comparison))
+
+
+def semantic_event_details_to_display_rows(
+    details: tuple[dict[str, str], ...] | list[dict[str, str]],
+) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    for detail in details:
+        rows.append(
+            {
+                "Change": event_type_label(detail["event_type"]),
+                "Identity": detail.get("policy_name") or detail.get("policy_key", ""),
+                "Property": detail.get("component_key") or detail.get("component_type", ""),
+                "Before": detail.get("before", ""),
+                "After": detail.get("after", ""),
+            }
+        )
+    return tuple(rows)
+
+
 def build_page_model(
     *,
     snapshots: list[SnapshotDescriptor],
     diagnostics_count: int,
+    legacy_export_count: int = 0,
     selected: SnapshotDescriptor | None,
     previous: SnapshotDescriptor | None,
     normalized: NormalizedSnapshot | None,
@@ -436,6 +463,7 @@ def build_page_model(
     )
     return ConfigurationPolicyPageModel(
         discovery_diagnostics_count=diagnostics_count,
+        legacy_export_count=legacy_export_count,
         snapshots=snapshots,
         selected_snapshot=selected,
         previous_snapshot=previous,

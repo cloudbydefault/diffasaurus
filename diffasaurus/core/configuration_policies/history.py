@@ -104,6 +104,34 @@ def _descriptor_from_bundle(bundle_path: Path) -> tuple[SnapshotDescriptor | Non
     return descriptor, []
 
 
+def _is_legacy_configuration_policy_export(bundle_path: Path) -> bool:
+    if (bundle_path / "snapshot_manifest.json").is_file():
+        return False
+    if not bundle_path.is_dir():
+        return False
+    has_manifest = any(
+        child.is_file() and child.name.startswith("Intune_ConfigurationPolicies_Manifest_")
+        for child in bundle_path.iterdir()
+    )
+    has_inventory = any(
+        child.is_file() and child.name.startswith("Intune_ConfigurationPolicies_Inventory_")
+        for child in bundle_path.iterdir()
+    )
+    return has_manifest and has_inventory
+
+
+def _legacy_configuration_policy_candidates(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if _is_legacy_configuration_policy_export(root):
+        candidates.append(root.resolve())
+    if not root.is_dir():
+        return candidates
+    for child in sorted(root.iterdir()):
+        if child.is_dir() and _is_legacy_configuration_policy_export(child):
+            candidates.append(child.resolve())
+    return candidates
+
+
 def _candidate_bundle_paths(root: Path) -> list[Path]:
     candidates: list[Path] = []
     if (root / "snapshot_manifest.json").is_file():
@@ -134,6 +162,20 @@ def discover_policy_snapshots(root: Path | str) -> DiscoveryResult:
     snapshots: list[SnapshotDescriptor] = []
     diagnostics: list[DiscoveryDiagnostic] = []
     seen_paths: set[str] = set()
+    seen_legacy: set[str] = set()
+
+    for legacy_path in _legacy_configuration_policy_candidates(resolved_root):
+        legacy_key = str(legacy_path)
+        if legacy_key in seen_legacy:
+            continue
+        seen_legacy.add(legacy_key)
+        diagnostics.append(
+            DiscoveryDiagnostic(
+                path=legacy_key,
+                category="legacy_configuration_policy_export",
+                message="legacy_configuration_policy_export",
+            )
+        )
 
     for candidate in _candidate_bundle_paths(resolved_root):
         candidate_key = str(candidate)
