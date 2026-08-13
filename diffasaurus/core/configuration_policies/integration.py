@@ -674,7 +674,10 @@ def resolve_group_display_name(
         return ""
     session = cache or POLICY_SESSION_CACHE
     snapshots = _entra_group_snapshots(Path(report_dir))
-    eligible = [item for item in snapshots if item.captured_at <= policy_captured_at]
+    policy_time = _as_naive_utc(policy_captured_at)
+    eligible = [
+        item for item in snapshots if _as_naive_utc(item.captured_at) <= policy_time
+    ]
     if not eligible:
         return group_id
     chosen = eligible[-1]

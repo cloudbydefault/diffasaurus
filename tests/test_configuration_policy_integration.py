@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -276,6 +276,47 @@ class GroupResolutionTests(unittest.TestCase):
                 resolve_group_display_name(root, "G1", datetime(2099, 1, 5, 12, 0, 0)),
                 "G1",
             )
+
+    def test_naive_entra_and_aware_utc_policy_datetime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_groups(root, datetime(2099, 1, 6, 9, 0, 0), {"G1": "Old Name"})
+            self._write_groups(root, datetime(2099, 1, 8, 9, 0, 0), {"G1": "New Name"})
+            POLICY_SESSION_CACHE.invalidate(root)
+            policy_time = datetime(2099, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
+            self.assertEqual(resolve_group_display_name(root, "G1", policy_time), "Old Name")
+
+    def test_non_utc_aware_policy_datetime_uses_utc_instant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Entra snapshot at 09:00 naive (treated as local wall time in filename semantics).
+            self._write_groups(root, datetime(2099, 1, 6, 9, 0, 0), {"G1": "Morning Name"})
+            self._write_groups(root, datetime(2099, 1, 6, 11, 0, 0), {"G1": "Later Name"})
+            POLICY_SESSION_CACHE.invalidate(root)
+            # 10:00 UTC == 12:00 +02:00; eligible snapshot is 09:00 naive, not 11:00.
+            policy_time = datetime(2099, 1, 6, 12, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+            self.assertEqual(resolve_group_display_name(root, "G1", policy_time), "Morning Name")
+
+    def test_future_entra_snapshot_excluded_with_aware_policy_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_groups(root, datetime(2099, 1, 6, 9, 0, 0), {"G1": "Old Name"})
+            self._write_groups(root, datetime(2099, 1, 8, 9, 0, 0), {"G1": "Future Name"})
+            POLICY_SESSION_CACHE.invalidate(root)
+            policy_time = datetime(2099, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
+            self.assertEqual(resolve_group_display_name(root, "G1", policy_time), "Old Name")
+            self.assertNotEqual(
+                resolve_group_display_name(root, "G1", policy_time),
+                "Future Name",
+            )
+
+    def test_before_first_entra_snapshot_falls_back_with_aware_policy_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_groups(root, datetime(2099, 1, 8, 9, 0, 0), {"G1": "New Name"})
+            POLICY_SESSION_CACHE.invalidate(root)
+            policy_time = datetime(2099, 1, 5, 12, 0, 0, tzinfo=timezone.utc)
+            self.assertEqual(resolve_group_display_name(root, "G1", policy_time), "G1")
 
 
 class TrustPresentationTests(unittest.TestCase):
