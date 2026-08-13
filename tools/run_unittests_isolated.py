@@ -3,9 +3,21 @@
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _format_returncode(returncode: int) -> str:
+    if returncode < 0:
+        sig = -returncode
+        try:
+            name = signal.Signals(sig).name
+        except ValueError:
+            name = "UNKNOWN"
+        return f"terminated by signal {sig} ({name})"
+    return str(returncode)
 
 
 def main() -> int:
@@ -24,6 +36,11 @@ def main() -> int:
             env=env,
         )
         if completed.returncode != 0:
+            print(
+                f"FAILED {name}: exit {_format_returncode(completed.returncode)}",
+                file=sys.stderr,
+                flush=True,
+            )
             failures.append(name)
     if failures:
         print("Failed modules:", ", ".join(failures), file=sys.stderr)
