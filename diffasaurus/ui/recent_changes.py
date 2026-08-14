@@ -269,6 +269,15 @@ class FamilyChangeSection(QFrame):
                     f"{removed:,} assignment{'s' if removed != 1 else ''} removed · "
                     f"{changed:,} assignment{'s' if changed != 1 else ''} changed"
                 )
+            elif item.family == "Exchange_SharedMailboxes":
+                added = item.summary.added
+                removed = item.summary.removed
+                changed = item.summary.changed
+                self.counts_label.setText(
+                    f"{added:,} shared mailbox{'es' if added != 1 else ''} added · "
+                    f"{removed:,} shared mailbox{'es' if removed != 1 else ''} removed · "
+                    f"{changed:,} shared mailbox{'es' if changed != 1 else ''} changed"
+                )
             else:
                 self.counts_label.setText(
                     f"{item.summary.added} added · {item.summary.removed} removed · "
@@ -403,6 +412,7 @@ class FamilyChangeSection(QFrame):
                     "Intune_iOS_Devices_Report",
                     "Intune_ManagedDevices_Compliance",
                     "Intune_Devices_Autopilot",
+                    "Exchange_SharedMailboxes",
                     "Entra_Role_Assignments",
                 }:
                     matching.append(detail)

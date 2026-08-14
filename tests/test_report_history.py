@@ -4447,6 +4447,541 @@ class IntuneManagedDevicesPresentationTests(unittest.TestCase):
         self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
 
 
+MAILBOX_EXT_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+MAILBOX_EXT_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+SHARED_MAILBOX_HEADERS = (
+    "DisplayName",
+    "PrimarySmtpAddress",
+    "Alias",
+    "ExternalDirectoryObjectId",
+    "RecipientTypeDetails",
+    "HiddenFromAddressListsEnabled",
+    "WhenCreated",
+    "HasFullAccessDelegates",
+    "FullAccessDelegates",
+    "FullAccessDelegatesCount",
+    "HasSendAsDelegates",
+    "SendAsDelegates",
+    "SendAsDelegatesCount",
+    "HasSendOnBehalfDelegates",
+    "SendOnBehalfDelegates",
+    "SendOnBehalfDelegatesCount",
+    "HasAnyDelegation",
+    "ForwardingAddress",
+    "ForwardingSmtpAddress",
+    "DeliverToMailboxAndForward",
+    "HasForwarding",
+    "LitigationHoldEnabled",
+    "RetentionPolicy",
+)
+
+
+def shared_mailbox_row(
+    *,
+    external_id: str = MAILBOX_EXT_ONE,
+    display_name: str = "Finance Shared",
+    primary_smtp: str = "finance@example.com",
+    alias: str = "finance",
+    full_access: str = "ada@example.com",
+    send_as: str = "ada@example.com",
+    send_on_behalf: str = "",
+    forwarding_smtp: str = "",
+    deliver_and_forward: str = "False",
+    litigation_hold: str = "False",
+    retention_policy: str = "",
+    hidden: str = "False",
+    **extra,
+) -> dict[str, str]:
+    has_full_access = bool(full_access) and not full_access.upper().startswith("ERROR:")
+    has_send_as = bool(send_as) and not send_as.upper().startswith("ERROR:")
+    has_send_on_behalf = bool(send_on_behalf)
+    full_access_count = 0 if full_access.upper().startswith("ERROR:") else len(
+        [part for part in full_access.split(";") if part.strip()]
+    )
+    send_as_count = 0 if send_as.upper().startswith("ERROR:") else len(
+        [part for part in send_as.split(";") if part.strip()]
+    )
+    send_on_behalf_count = len([part for part in send_on_behalf.split(";") if part.strip()])
+    has_forwarding = bool(str(extra.get("ForwardingAddress", "") or forwarding_smtp).strip())
+    row = {
+        "DisplayName": display_name,
+        "PrimarySmtpAddress": primary_smtp,
+        "Alias": alias,
+        "ExternalDirectoryObjectId": external_id,
+        "RecipientTypeDetails": "SharedMailbox",
+        "HiddenFromAddressListsEnabled": hidden,
+        "WhenCreated": "2026-01-01T00:00:00Z",
+        "HasFullAccessDelegates": str(has_full_access),
+        "FullAccessDelegates": full_access,
+        "FullAccessDelegatesCount": str(full_access_count),
+        "HasSendAsDelegates": str(has_send_as),
+        "SendAsDelegates": send_as,
+        "SendAsDelegatesCount": str(send_as_count),
+        "HasSendOnBehalfDelegates": str(has_send_on_behalf),
+        "SendOnBehalfDelegates": send_on_behalf,
+        "SendOnBehalfDelegatesCount": str(send_on_behalf_count),
+        "HasAnyDelegation": str(has_full_access or has_send_as or has_send_on_behalf),
+        "ForwardingAddress": "",
+        "ForwardingSmtpAddress": forwarding_smtp,
+        "DeliverToMailboxAndForward": deliver_and_forward,
+        "HasForwarding": str(has_forwarding),
+        "LitigationHoldEnabled": litigation_hold,
+        "RetentionPolicy": retention_policy,
+    }
+    row.update(extra)
+    return row
+
+
+class ExchangeSharedMailboxesComparisonTests(unittest.TestCase):
+    FAMILY = "Exchange_SharedMailboxes"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = shared_mailbox_row()
+        for path, rows in (
+            (root / f"{self.FAMILY}_20260731-042100.csv", baseline_rows),
+            (root / f"{self.FAMILY}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_external_directory_object_id_is_preferred_key(self):
+        headers = list(SHARED_MAILBOX_HEADERS)
+        self.assertEqual(suggested_key(headers, self.FAMILY), "ExternalDirectoryObjectId")
+
+    def test_primary_smtp_address_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    shared_mailbox_row(
+                        external_id="",
+                        primary_smtp="finance@example.com",
+                        litigation_hold="False",
+                    ),
+                ],
+                [
+                    shared_mailbox_row(
+                        external_id="",
+                        primary_smtp="finance@example.com",
+                        litigation_hold="True",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_smtp_rename_remains_one_changed_mailbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    shared_mailbox_row(
+                        display_name="Finance Shared",
+                        primary_smtp="old-finance@example.com",
+                    ),
+                ],
+                [
+                    shared_mailbox_row(
+                        display_name="Finance Shared",
+                        primary_smtp="finance@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "PrimarySmtpAddress")
+            self.assertEqual(detail_identity(changed), "Finance Shared · finance@example.com")
+
+    def test_friendly_added_and_removed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    shared_mailbox_row(
+                        external_id=MAILBOX_EXT_ONE,
+                        display_name="Removed Mailbox",
+                        primary_smtp="removed@example.com",
+                    ),
+                ],
+                [
+                    shared_mailbox_row(
+                        external_id=MAILBOX_EXT_TWO,
+                        display_name="Added Mailbox",
+                        primary_smtp="added@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Added Mailbox · added@example.com")
+            self.assertEqual(detail_identity(removed), "Removed Mailbox · removed@example.com")
+
+    def test_full_access_reorder_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="a@example.com; b@example.com")],
+                [shared_mailbox_row(full_access="b@example.com; a@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_full_access_membership_change_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="a@example.com; b@example.com")],
+                [shared_mailbox_row(full_access="a@example.com; c@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "FullAccessDelegates")
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"FullAccessDelegates"})
+
+    def test_send_as_reorder_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_as="a@example.com; b@example.com")],
+                [shared_mailbox_row(send_as="b@example.com; a@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_send_as_membership_change_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_as="a@example.com; b@example.com")],
+                [shared_mailbox_row(send_as="a@example.com; c@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"SendAsDelegates"})
+
+    def test_send_on_behalf_reorder_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_on_behalf="a@example.com; b@example.com")],
+                [shared_mailbox_row(send_on_behalf="b@example.com; a@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_send_on_behalf_membership_change_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_on_behalf="a@example.com; b@example.com")],
+                [shared_mailbox_row(send_on_behalf="a@example.com; c@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"SendOnBehalfDelegates"})
+
+    def test_delegate_count_only_difference_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="a@example.com; b@example.com", send_as="a@example.com")],
+                [
+                    shared_mailbox_row(
+                        full_access="a@example.com; b@example.com",
+                        send_as="a@example.com",
+                        FullAccessDelegatesCount="99",
+                        SendAsDelegatesCount="99",
+                        HasAnyDelegation="True",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_has_forwarding_difference_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(forwarding_smtp="external@example.net")],
+                [
+                    shared_mailbox_row(
+                        forwarding_smtp="external@example.net",
+                        HasForwarding="False",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_full_access_success_to_error_does_not_create_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="a@example.com; b@example.com")],
+                [shared_mailbox_row(full_access="ERROR: transient failure")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertNotIn("FullAccessDelegates", columns)
+
+    def test_full_access_error_to_success_does_not_create_addition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="ERROR: transient failure")],
+                [shared_mailbox_row(full_access="a@example.com; b@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertNotIn("FullAccessDelegates", columns)
+
+    def test_full_access_error_to_error_has_no_semantic_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="ERROR: first failure")],
+                [shared_mailbox_row(full_access="ERROR: second failure")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_send_as_success_to_error_does_not_create_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_as="a@example.com")],
+                [shared_mailbox_row(send_as="ERROR: transient failure")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertNotIn("SendAsDelegates", columns)
+
+    def test_send_as_error_to_success_does_not_create_addition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(send_as="ERROR: transient failure")],
+                [shared_mailbox_row(send_as="a@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertNotIn("SendAsDelegates", columns)
+
+    def test_empty_to_populated_delegates_is_real_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="")],
+                [shared_mailbox_row(full_access="a@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "FullAccessDelegates")
+            self.assertEqual(changed["before"], "")
+            self.assertEqual(changed["after"], "a@example.com")
+
+    def test_populated_to_empty_delegates_is_real_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(full_access="a@example.com")],
+                [shared_mailbox_row(full_access="")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_forwarding_smtp_address_change_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(forwarding_smtp="")],
+                [shared_mailbox_row(forwarding_smtp="external@example.net")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "ForwardingSmtpAddress")
+            self.assertEqual(changed["after"], "external@example.net")
+
+    def test_deliver_to_mailbox_and_forward_change_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(deliver_and_forward="False")],
+                [shared_mailbox_row(deliver_and_forward="True")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("DeliverToMailboxAndForward", columns)
+
+    def test_litigation_hold_and_retention_changes_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(litigation_hold="False", retention_policy="")],
+                [shared_mailbox_row(litigation_hold="True", retention_policy="Default MRM Policy")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("LitigationHoldEnabled", columns)
+            self.assertIn("RetentionPolicy", columns)
+
+    def test_hidden_from_address_lists_change_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [shared_mailbox_row(hidden="False")],
+                [shared_mailbox_row(hidden="True")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(
+                detail for detail in result.details if detail["column"] == "HiddenFromAddressListsEnabled"
+            )
+            self.assertEqual(changed["before"], "False")
+            self.assertEqual(changed["after"], "True")
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class ExchangeSharedMailboxesPresentationTests(unittest.TestCase):
+    FAMILY = "Exchange_SharedMailboxes"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("FullAccessDelegates", self.FAMILY), "Full Access delegates")
+        self.assertEqual(property_display_text("ForwardingSmtpAddress", self.FAMILY), "Forwarding SMTP address")
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Shared mailbox")
+        tooltip = property_tooltip("RetentionPolicy", self.FAMILY)
+        self.assertIn("Retention policy", tooltip)
+        self.assertIn("CSV field: RetentionPolicy", tooltip)
+
+    def test_identity_tooltip_includes_mailbox_fields(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Finance Shared · finance@example.com",
+            "display_name": "Finance Shared",
+            "primary_smtp": "finance@example.com",
+            "alias": "finance",
+            "external_directory_object_id": MAILBOX_EXT_ONE,
+            "key": MAILBOX_EXT_ONE,
+        }
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("Finance Shared · finance@example.com", tooltip)
+        self.assertIn("PrimarySmtpAddress:", tooltip)
+        self.assertIn("ExternalDirectoryObjectId:", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": MAILBOX_EXT_ONE,
+                    "identity": "Finance Shared · finance@example.com",
+                    "column": "FullAccessDelegates",
+                    "before": "a@example.com",
+                    "after": "a@example.com; b@example.com",
+                    "display_name": "Finance Shared",
+                    "primary_smtp": "finance@example.com",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Finance Shared · finance@example.com")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Full Access delegates")
+
+    def test_recent_changes_summary_uses_shared_mailbox_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="ExternalDirectoryObjectId",
+            summary=ComparisonSummary(added=1, removed=2, changed=3, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 shared mailbox added · 2 shared mailboxes removed · 3 shared mailboxes changed",
+        )
+
+    def test_comparison_summary_unit_uses_shared_mailboxes(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "shared mailboxes")
+
+    def test_delegate_delta_summary(self):
+        from diffasaurus.core.report_history import delegate_collection_delta_summary
+
+        summary = delegate_collection_delta_summary(
+            "a@example.com; b@example.com",
+            "a@example.com; c@example.com",
+        )
+        self.assertIn("Removed delegates:", summary)
+        self.assertIn("b@example.com", summary)
+        self.assertIn("Added delegates:", summary)
+        self.assertIn("c@example.com", summary)
+
+
 AUTOPILOT_OBJECT_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 AUTOPILOT_OBJECT_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 AUTOPILOT_AAD_ONE = "cccccccc-cccc-cccc-cccc-cccccccccccc"
