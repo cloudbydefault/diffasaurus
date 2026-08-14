@@ -870,8 +870,8 @@ class EntraGroupsIdentityDisplayTests(unittest.TestCase):
                 "Entra_Users_Properties",
             )
             added = next(detail for detail in result.details if detail["change"] == "Added")
-            self.assertNotIn("identity", added)
-            self.assertEqual(detail_identity(added), "linus@example.com")
+            self.assertEqual(detail_identity(added), "Linus · linus@example.com")
+            self.assertEqual(added["UPN"], "linus@example.com")
 
     def test_recent_changes_search_matches_display_name_and_group_id(self):
         from diffasaurus.ui.recent_changes import FamilyChangeSection
@@ -1096,6 +1096,102 @@ def auth_methods_hybrid_row(
         "SystemPreferredAuthenticationMethods": system_preferred_methods,
         "LastUpdatedDateTime": last_updated,
         "ReportSource": report_source,
+    }
+    row.update(extra)
+    return row
+
+
+def user_properties_row(
+    entra_id: str,
+    *,
+    display_name: str = "",
+    upn: str = "",
+    given_name: str = "",
+    surname: str = "",
+    mail: str = "",
+    mail_nickname: str = "",
+    user_type: str = "Member",
+    account_enabled: str = "True",
+    created: str = "2025-01-01T00:00:00Z",
+    identities: str = "",
+    street_address: str = "",
+    city: str = "",
+    state: str = "",
+    postal_code: str = "",
+    country: str = "",
+    business_phones: str = "",
+    mobile_phone: str = "",
+    other_mails: str = "",
+    proxy_addresses: str = "",
+    im_addresses: str = "",
+    job_title: str = "",
+    company_name: str = "",
+    department: str = "",
+    office_location: str = "",
+    employee_id: str = "",
+    employee_type: str = "",
+    employee_hire_date: str = "",
+    usage_location: str = "",
+    preferred_language: str = "",
+    preferred_data_location: str = "",
+    on_premises_sync: str = "False",
+    on_premises_last_sync: str = "",
+    on_premises_dn: str = "",
+    on_premises_immutable_id: str = "",
+    extension_attributes: str = "",
+    manager_display_name: str = "",
+    manager_upn: str = "",
+    sponsors: str = "",
+    manager_status: str = "200",
+    manager_error: str = "",
+    sponsors_status: str = "200",
+    sponsors_error: str = "",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "Id": entra_id,
+        "DisplayName": display_name,
+        "GivenName": given_name,
+        "Surname": surname,
+        "UPN": upn,
+        "Mail": mail,
+        "MailNickname": mail_nickname,
+        "UserType": user_type,
+        "AccountEnabled": account_enabled,
+        "CreatedDateTime": created,
+        "Identities": identities,
+        "StreetAddress": street_address,
+        "City": city,
+        "State": state,
+        "PostalCode": postal_code,
+        "Country": country,
+        "BusinessPhones": business_phones,
+        "MobilePhone": mobile_phone,
+        "OtherMails": other_mails,
+        "ProxyAddresses": proxy_addresses,
+        "IMAddresses": im_addresses,
+        "JobTitle": job_title,
+        "CompanyName": company_name,
+        "Department": department,
+        "OfficeLocation": office_location,
+        "EmployeeId": employee_id,
+        "EmployeeType": employee_type,
+        "EmployeeHireDate": employee_hire_date,
+        "UsageLocation": usage_location,
+        "PreferredLanguage": preferred_language,
+        "PreferredDataLocation": preferred_data_location,
+        "OnPremisesSyncEnabled": on_premises_sync,
+        "OnPremisesLastSyncDateTime": on_premises_last_sync,
+        "OnPremisesDistinguishedName": on_premises_dn,
+        "OnPremisesImmutableId": on_premises_immutable_id,
+        "ExtensionAttributes": extension_attributes,
+        "ManagerDisplayName": manager_display_name,
+        "ManagerUPN": manager_upn,
+        "Sponsors": sponsors,
+        "ManagerStatus": manager_status,
+        "ManagerError": manager_error,
+        "SponsorsStatus": sponsors_status,
+        "SponsorsError": sponsors_error,
     }
     row.update(extra)
     return row
@@ -2086,6 +2182,509 @@ class EntraAuthMethodsHybridPresentationTests(unittest.TestCase):
         )
 
 
+class EntraUserPropertiesComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Users_Properties"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = user_properties_row("template-id", upn="template@example.com")
+        for path, rows in (
+            (root / "Entra_Users_Properties_20260731-042100.csv", baseline_rows),
+            (root / "Entra_Users_Properties_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_id_is_preferred_over_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [user_properties_row("user-1", display_name="Ada", upn="ada@example.com")],
+                [user_properties_row("user-1", display_name="Ada", upn="ada@example.com")],
+            )
+            self.assertEqual(suggested_key(baseline.headers, self.FAMILY), "Id")
+
+    def test_upn_rename_stays_same_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada Lovelace",
+                        upn="ada.old@example.com",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada Lovelace",
+                        upn="ada.new@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "UPN")
+
+    def test_multiple_property_changes_count_as_one_changed_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Yan LECOZ",
+                        upn="yan@example.com",
+                        job_title="Développeur Aubay",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Yan LE COZ",
+                        upn="yan@example.com",
+                        job_title="Développeur",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed_columns = {
+                detail["column"] for detail in result.details if detail["change"] == "Changed"
+            }
+            self.assertEqual(changed_columns, {"DisplayName", "JobTitle"})
+
+    def test_added_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Paul Example",
+                        upn="paul@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertEqual(detail_identity(added), "Paul Example · paul@example.com")
+            self.assertEqual(added["user_id"], "user-1")
+
+    def test_removed_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Jane Example",
+                        upn="jane@example.com",
+                    ),
+                ],
+                [],
+            )
+            result = self._compare(baseline, latest)
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(removed), "Jane Example · jane@example.com")
+
+    def test_diagnostic_status_fields_do_not_create_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_status="500",
+                        manager_error="Server error",
+                        sponsors_status="503",
+                        sponsors_error="Unavailable",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_status="429",
+                        manager_error="Too many requests",
+                        sponsors_status="504",
+                        sponsors_error="Gateway timeout",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+            changed_columns = {detail["column"] for detail in result.details}
+            self.assertFalse(
+                changed_columns
+                & {"ManagerStatus", "ManagerError", "SponsorsStatus", "SponsorsError"}
+            )
+
+    def test_manager_known_zero_vs_successful_manager(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_status="404",
+                        manager_error="Resource not found",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_display_name="Grace Hopper",
+                        manager_upn="grace@example.com",
+                        manager_status="200",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed_columns = {
+                detail["column"] for detail in result.details if detail["change"] == "Changed"
+            }
+            self.assertEqual(changed_columns, {"ManagerDisplayName", "ManagerUPN"})
+
+    def test_manager_retrieval_failure_does_not_create_fake_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_display_name="Grace Hopper",
+                        manager_upn="grace@example.com",
+                        manager_status="200",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        manager_status="503",
+                        manager_error="Service unavailable",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 0)
+            self.assertFalse(
+                any(detail["column"] in {"ManagerDisplayName", "ManagerUPN"} for detail in result.details)
+            )
+
+    def test_sponsor_retrieval_failure_does_not_create_fake_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        sponsors="Bob Example",
+                        sponsors_status="200",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        sponsors_status="500",
+                        sponsors_error="Server error",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 0)
+            self.assertFalse(any(detail["column"] == "Sponsors" for detail in result.details))
+
+    def test_sponsor_known_empty_result_remains_trustworthy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        sponsors="",
+                        sponsors_status="200",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        sponsors="Bob Example",
+                        sponsors_status="200",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "Sponsors")
+            self.assertEqual(changed["before"], "")
+            self.assertEqual(changed["after"], "Bob Example")
+
+    def test_collection_reorder_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        business_phones="+33 1 23 45 67 ; +33 6 12 34 56",
+                        proxy_addresses="SMTP:ada@example.com ; smtp:alias@example.com",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        business_phones="+33 6 12 34 56 ; +33 1 23 45 67",
+                        proxy_addresses="smtp:alias@example.com ; SMTP:ada@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_collection_content_change_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        other_mails="one@example.com ; two@example.com",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        other_mails="one@example.com ; three@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "OtherMails")
+            self.assertEqual(changed["before"], "one@example.com ; two@example.com")
+            self.assertEqual(changed["after"], "one@example.com ; three@example.com")
+
+    def test_extension_attributes_order_is_semantic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        extension_attributes="extensionAttribute1=A ; extensionAttribute2=B",
+                    ),
+                ],
+                [
+                    user_properties_row(
+                        "user-1",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                        extension_attributes="extensionAttribute2=B ; extensionAttribute1=A",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(
+                detail for detail in result.details if detail["column"] == "ExtensionAttributes"
+            )
+            self.assertNotEqual(changed["before"], changed["after"])
+
+    def test_legacy_snapshot_without_id_falls_back_to_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_headers = {
+                "DisplayName": "Ada",
+                "UPN": "ada@example.com",
+                "UserType": "Member",
+                "AccountEnabled": "True",
+            }
+            for stamp, upn in (
+                ("20260731-042100", "ada.old@example.com"),
+                ("20260804-042100", "ada.new@example.com"),
+            ):
+                row = dict(legacy_headers)
+                row["UPN"] = upn
+                write_report(root / f"Entra_Users_Properties_{stamp}.csv", [row])
+            snapshots = scan_report_history(root)[self.FAMILY]
+            self.assertEqual(suggested_key(snapshots[0].headers, self.FAMILY), "UPN")
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                "UPN",
+                self.FAMILY,
+            )
+            self.assertEqual((result.added, result.removed), (1, 1))
+
+    def test_generic_family_still_compares_last_updated_datetime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [
+                    {
+                        "UPN": "ada@example.com",
+                        "Department": "R&D",
+                        "LastUpdatedDateTime": "2026-08-12T12:00:00Z",
+                    },
+                ],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [
+                    {
+                        "UPN": "ada@example.com",
+                        "Department": "R&D",
+                        "LastUpdatedDateTime": "2026-08-13T15:18:14Z",
+                    },
+                ],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            result = compare_snapshots(snapshots[0], snapshots[1], "UPN")
+            changed_columns = {
+                detail["column"] for detail in result.details if detail["change"] == "Changed"
+            }
+            self.assertIn("LastUpdatedDateTime", changed_columns)
+
+
+class EntraUserPropertiesPresentationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        family = "Entra_Users_Properties"
+        self.assertEqual(property_display_text("DisplayName", family), "Display name")
+        self.assertEqual(property_display_text("JobTitle", family), "Job title")
+        self.assertEqual(property_display_text("UPN", family), "User principal name")
+        self.assertEqual(property_display_text("", family, change="Added"), "User")
+        tooltip = property_tooltip("ManagerDisplayName", family)
+        self.assertIn("Manager display name", tooltip)
+        self.assertIn("CSV field: ManagerDisplayName", tooltip)
+
+    def test_identity_tooltip_includes_id(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Yan LE COZ · yan@example.com",
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "UPN": "yan@example.com",
+            "key": "00000000-0000-0000-0000-000000000001",
+        }
+        tooltip = identity_tooltip(detail, "Entra_Users_Properties")
+        self.assertIn("Yan LE COZ · yan@example.com", tooltip)
+        self.assertIn("Id: 00000000-0000-0000-0000-000000000001", tooltip)
+        self.assertIn("UPN: yan@example.com", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_property(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = "Entra_Users_Properties"
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": "user-1",
+                    "identity": "Yan LE COZ · yan@example.com",
+                    "column": "JobTitle",
+                    "before": "Développeur Aubay",
+                    "after": "Développeur",
+                    "user_id": "user-1",
+                    "UPN": "yan@example.com",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Yan LE COZ · yan@example.com")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Job title")
+
+    def test_recent_changes_summary_uses_user_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family="Entra_Users_Properties",
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="Id",
+            summary=ComparisonSummary(added=1, removed=1, changed=1, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 user added · 1 user removed · 1 user changed",
+        )
+
+    def test_comparison_summary_unit_uses_users(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit("Entra_Users_Properties"), "users")
+
+
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Group_User_Memberships"
 
@@ -2493,7 +3092,7 @@ class EntraGroupMembershipComparisonTests(unittest.TestCase):
             comparison_summary_unit("Entra_Group_User_Memberships"),
             "memberships",
         )
-        self.assertEqual(comparison_summary_unit("Entra_Users_Properties"), "rows")
+        self.assertEqual(comparison_summary_unit("Entra_Users_Properties"), "users")
 
     def test_identity_tooltip_contains_full_relationship_text(self):
         from diffasaurus.ui.comparison_presentation import identity_tooltip
