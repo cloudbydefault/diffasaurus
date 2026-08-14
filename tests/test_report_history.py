@@ -26,6 +26,7 @@ from diffasaurus.core.report_history import (
     metric_series,
     report_family,
     report_run_health,
+    role_assignment_suggested_key_label,
     scan_report_index,
     scan_report_history,
     save_analysis_cache,
@@ -3731,6 +3732,860 @@ class IntuneAutopilotDevicesPresentationTests(unittest.TestCase):
         from diffasaurus.core.report_history import comparison_summary_unit
 
         self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
+
+
+ROLE_USER_ONE = "11111111-1111-1111-1111-111111111111"
+ROLE_USER_TWO = "22222222-2222-2222-2222-222222222222"
+ROLE_DEF_GLOBAL_READER = "33333333-3333-3333-3333-333333333333"
+ROLE_DEF_SECURITY_READER = "44444444-4444-4444-4444-444444444444"
+SCHEDULE_ACTIVE_DIRECT = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+SCHEDULE_ELIGIBLE_DIRECT = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+SCHEDULE_ACTIVE_GROUP = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+SCHEDULE_ELIGIBLE_GROUP = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+GROUP_ONE = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+GROUP_TWO = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+SCOPE_TENANT = "/"
+SCOPE_APP = "app-scope-1"
+
+LEGACY_ROLE_HEADERS = (
+    "UserPrincipalName",
+    "DisplayName",
+    "Mail",
+    "AccountEnabled",
+    "RoleName",
+    "RoleState",
+    "AssignmentSource",
+    "SourceGroup",
+)
+
+STABLE_ROLE_HEADERS = LEGACY_ROLE_HEADERS + (
+    "UserId",
+    "RoleDefinitionId",
+    "AssignmentScheduleId",
+    "SourcePrincipalId",
+    "SourceGroupId",
+    "DirectoryScopeId",
+    "AppScopeId",
+)
+
+
+def legacy_role_assignment_row(
+    *,
+    upn: str = "ada@example.com",
+    display_name: str = "Ada Lovelace",
+    mail: str = "ada@example.com",
+    account_enabled: str = "True",
+    role_name: str = "Global Reader",
+    role_state: str = "Active",
+    assignment_source: str = "Direct",
+    source_group: str = "",
+) -> dict[str, str]:
+    return {
+        "UserPrincipalName": upn,
+        "DisplayName": display_name,
+        "Mail": mail,
+        "AccountEnabled": account_enabled,
+        "RoleName": role_name,
+        "RoleState": role_state,
+        "AssignmentSource": assignment_source,
+        "SourceGroup": source_group,
+    }
+
+
+def stable_role_assignment_row(
+    *,
+    upn: str = "ada@example.com",
+    display_name: str = "Ada Lovelace",
+    mail: str = "ada@example.com",
+    account_enabled: str = "True",
+    role_name: str = "Global Reader",
+    role_state: str = "Active",
+    assignment_source: str = "Direct",
+    source_group: str = "",
+    user_id: str = ROLE_USER_ONE,
+    role_definition_id: str = ROLE_DEF_GLOBAL_READER,
+    assignment_schedule_id: str = SCHEDULE_ACTIVE_DIRECT,
+    source_principal_id: str = ROLE_USER_ONE,
+    source_group_id: str = "",
+    directory_scope_id: str = SCOPE_TENANT,
+    app_scope_id: str = "",
+) -> dict[str, str]:
+    row = legacy_role_assignment_row(
+        upn=upn,
+        display_name=display_name,
+        mail=mail,
+        account_enabled=account_enabled,
+        role_name=role_name,
+        role_state=role_state,
+        assignment_source=assignment_source,
+        source_group=source_group,
+    )
+    if assignment_source == "Group" and source_group_id:
+        source_principal_id = source_group_id
+    row.update(
+        {
+            "UserId": user_id,
+            "RoleDefinitionId": role_definition_id,
+            "AssignmentScheduleId": assignment_schedule_id,
+            "SourcePrincipalId": source_principal_id,
+            "SourceGroupId": source_group_id,
+            "DirectoryScopeId": directory_scope_id,
+            "AppScopeId": app_scope_id,
+        }
+    )
+    return row
+
+
+class EntraRoleAssignmentsComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Role_Assignments"
+
+    def _write_pair(
+        self,
+        root: Path,
+        baseline_rows,
+        latest_rows,
+        *,
+        legacy: bool = True,
+    ):
+        headers = list(LEGACY_ROLE_HEADERS if legacy else STABLE_ROLE_HEADERS)
+        for path, rows in (
+            (root / f"{self.FAMILY}_20260731-042100.csv", baseline_rows),
+            (root / f"{self.FAMILY}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_upn_only_collision_overwrites_sibling_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                legacy_role_assignment_row(
+                    role_name="Security Reader",
+                    role_state="Eligible",
+                    assignment_source="Group",
+                    source_group="PIM-Readers",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            broken_map = {}
+            for row in rows:
+                key = row["UserPrincipalName"]
+                broken_map[key] = row
+            self.assertEqual(len(broken_map), 1)
+            fixed = self._compare(baseline, latest)
+            self.assertEqual(fixed.stable, 2)
+
+    def test_legacy_multiple_roles_for_one_user_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                    ),
+                ],
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                    ),
+                ],
+            )
+            self.assertEqual(
+                suggested_key(baseline.headers, self.FAMILY),
+                "Role assignment (legacy)",
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_legacy_active_and_eligible_rows_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Eligible"),
+                ],
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Eligible"),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_legacy_direct_and_group_assignments_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(
+                        role_name="Global Reader",
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                    ),
+                ],
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(
+                        role_name="Global Reader",
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_legacy_same_role_via_two_groups_remains_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        assignment_source="Group",
+                        source_group="Group A",
+                    ),
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        assignment_source="Group",
+                        source_group="Group B",
+                    ),
+                ],
+                [
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        assignment_source="Group",
+                        source_group="Group A",
+                    ),
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        assignment_source="Group",
+                        source_group="Group B",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_stable_schedule_and_user_key_keeps_rows_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_DIRECT,
+                        user_id=ROLE_USER_ONE,
+                    ),
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        user_id=ROLE_USER_ONE,
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_DIRECT,
+                        user_id=ROLE_USER_ONE,
+                    ),
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        user_id=ROLE_USER_ONE,
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                ],
+                legacy=False,
+            )
+            self.assertEqual(
+                suggested_key(baseline.headers, self.FAMILY),
+                "Assignment schedule + User",
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_stable_user_id_distinguishes_group_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        upn="ada@example.com",
+                        display_name="Ada",
+                        user_id=ROLE_USER_ONE,
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                    stable_role_assignment_row(
+                        upn="grace@example.com",
+                        display_name="Grace",
+                        user_id=ROLE_USER_TWO,
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        upn="ada@example.com",
+                        display_name="Ada",
+                        user_id=ROLE_USER_ONE,
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                    stable_role_assignment_row(
+                        upn="grace@example.com",
+                        display_name="Grace",
+                        user_id=ROLE_USER_TWO,
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_stable_upn_rename_does_not_change_assignment_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(upn="ada.old@example.com")],
+                [stable_role_assignment_row(upn="ada.new@example.com")],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_stable_display_name_rename_does_not_create_assignment_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(display_name="Ada")],
+                [stable_role_assignment_row(display_name="Ada Lovelace")],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_stable_account_enabled_change_does_not_flood_assignments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(account_enabled="True")],
+                [stable_role_assignment_row(account_enabled="False")],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_stable_role_name_rename_does_not_create_assignment_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(role_name="Global Reader")],
+                [stable_role_assignment_row(role_name="Global Reader Renamed")],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_stable_source_group_rename_with_same_group_id_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="Old Group Name",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="New Group Name",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_stable_different_source_group_id_is_different_assignment_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="Group A",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="Group B",
+                        source_group_id=GROUP_TWO,
+                        source_principal_id=GROUP_TWO,
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            self.assertEqual(result.changed, 0)
+
+    def test_stable_directory_scope_difference_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(directory_scope_id=SCOPE_TENANT)],
+                [stable_role_assignment_row(directory_scope_id="/different-scope")],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "DirectoryScopeId")
+            self.assertEqual(changed["before"], SCOPE_TENANT)
+            self.assertEqual(changed["after"], "/different-scope")
+
+    def test_stable_app_scope_difference_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [stable_role_assignment_row(app_scope_id="")],
+                [stable_role_assignment_row(app_scope_id=SCOPE_APP)],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "AppScopeId")
+            self.assertEqual(changed["after"], SCOPE_APP)
+
+    def test_active_to_eligible_becomes_removed_and_added_not_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_DIRECT,
+                        role_state="Active",
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_DIRECT,
+                        role_state="Eligible",
+                        role_definition_id=ROLE_DEF_GLOBAL_READER,
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (1, 1, 0))
+            columns = {detail.get("column") for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, set())
+
+    def test_multiple_changed_properties_count_as_one_assignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Active",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                        directory_scope_id=SCOPE_TENANT,
+                    ),
+                ],
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_GROUP,
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                        directory_scope_id="/different-scope",
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed_columns = {
+                detail["column"] for detail in result.details if detail["change"] == "Changed"
+            }
+            self.assertEqual(changed_columns, {"RoleState", "DirectoryScopeId"})
+
+    def test_schema_boundary_uses_legacy_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline_rows = [legacy_role_assignment_row(role_name="Global Reader", role_state="Active")]
+            latest_rows = [stable_role_assignment_row(role_name="Global Reader", role_state="Active")]
+            with (root / f"{self.FAMILY}_20260731-042100.csv").open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(LEGACY_ROLE_HEADERS))
+                writer.writeheader()
+                writer.writerows(baseline_rows)
+            with (root / f"{self.FAMILY}_20260804-042100.csv").open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(STABLE_ROLE_HEADERS))
+                writer.writeheader()
+                writer.writerows(latest_rows)
+            snapshots = scan_report_history(root)[self.FAMILY]
+            baseline, latest = snapshots[0], snapshots[1]
+            self.assertEqual(
+                suggested_key(latest.headers, self.FAMILY),
+                "Assignment schedule + User",
+            )
+            result = compare_snapshots(
+                baseline,
+                latest,
+                role_assignment_suggested_key_label(baseline.headers),
+                self.FAMILY,
+            )
+            self.assertEqual(result.stable, 1)
+
+    def test_friendly_direct_and_group_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    stable_role_assignment_row(
+                        assignment_schedule_id=SCHEDULE_ACTIVE_DIRECT,
+                        role_state="Active",
+                        assignment_source="Direct",
+                    ),
+                    stable_role_assignment_row(
+                        role_name="Security Reader",
+                        role_definition_id=ROLE_DEF_SECURITY_READER,
+                        assignment_schedule_id=SCHEDULE_ELIGIBLE_GROUP,
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Security-Readers",
+                        source_group_id=GROUP_ONE,
+                        source_principal_id=GROUP_ONE,
+                    ),
+                ],
+                legacy=False,
+            )
+            result = self._compare(baseline, latest)
+            added = [d for d in result.details if d["change"] == "Added"]
+            self.assertEqual(len(added), 2)
+            self.assertEqual(detail_identity(added[0]), "Ada Lovelace → Global Reader")
+            self.assertEqual(added[0]["after"], "Active · Direct")
+            self.assertEqual(
+                detail_identity(added[1]),
+                "Ada Lovelace → Security Reader",
+            )
+            self.assertEqual(added[1]["after"], "Eligible · via PIM-Security-Readers")
+            self.assertEqual((result.added, result.removed, result.changed), (2, 0, 0))
+
+    def test_comparison_counts_unchanged_with_compact_presentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [legacy_role_assignment_row(role_name="Global Reader", role_state="Active")],
+                [
+                    legacy_role_assignment_row(role_name="Global Reader", role_state="Active"),
+                    legacy_role_assignment_row(
+                        role_name="Security Reader",
+                        role_state="Eligible",
+                        assignment_source="Group",
+                        source_group="PIM-Readers",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (1, 0, 0))
+            added = next(d for d in result.details if d["change"] == "Added")
+            self.assertEqual(detail_identity(added), "Ada Lovelace → Security Reader")
+            self.assertEqual(added["after"], "Eligible · via PIM-Readers")
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class EntraRoleAssignmentsPresentationTests(unittest.TestCase):
+    FAMILY = "Entra_Role_Assignments"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("RoleState", self.FAMILY), "Role state")
+        self.assertEqual(property_display_text("DirectoryScopeId", self.FAMILY), "Directory scope")
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Role assignment")
+        tooltip = property_tooltip("AssignmentScheduleId", self.FAMILY)
+        self.assertIn("Assignment schedule ID", tooltip)
+        self.assertIn("CSV field: AssignmentScheduleId", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": f"{SCHEDULE_ACTIVE_DIRECT}{chr(31)}{ROLE_USER_ONE}",
+                    "identity": "Ada Lovelace → Global Reader",
+                    "column": "DirectoryScopeId",
+                    "before": "/",
+                    "after": "/administrativeUnits/abc",
+                    "display_name": "Ada Lovelace",
+                    "UPN": "ada@example.com",
+                    "role_name": "Global Reader",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(
+            section.detail_table.item(0, 1).text(),
+            "Ada Lovelace → Global Reader",
+        )
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Directory scope")
+
+    def test_added_direct_presentation_includes_role_and_path(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        detail = {
+            "change": "Added",
+            "key": f"{SCHEDULE_ACTIVE_DIRECT}{chr(31)}{ROLE_USER_ONE}",
+            "identity": "Théo DESCHAMPS → Global Reader",
+            "column": "",
+            "before": "",
+            "after": "Active · Direct",
+            "display_name": "Théo DESCHAMPS",
+            "UPN": "theo.deschamps@floa.com",
+            "user_id": ROLE_USER_ONE,
+            "role_name": "Global Reader",
+            "role_state": "Active",
+            "assignment_source": "Direct",
+        }
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=1,
+            removed=0,
+            changed=0,
+            stable=0,
+            details=(detail,),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(
+            section.detail_table.item(0, 1).text(),
+            "Théo DESCHAMPS → Global Reader",
+        )
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Role assignment")
+        self.assertEqual(section.detail_table.item(0, 3).text(), "")
+        self.assertEqual(section.detail_table.item(0, 4).text(), "Active · Direct")
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("UserPrincipalName: theo.deschamps@floa.com", tooltip)
+        self.assertIn("UserId:", tooltip)
+
+    def test_removed_group_presentation_includes_role_and_path(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=1,
+            changed=0,
+            stable=0,
+            details=(
+                {
+                    "change": "Removed",
+                    "key": f"{SCHEDULE_ELIGIBLE_GROUP}{chr(31)}{ROLE_USER_ONE}",
+                    "identity": "Jane DOE → Security Reader",
+                    "column": "",
+                    "before": "Eligible · via PIM-Security-Readers",
+                    "after": "",
+                    "display_name": "Jane DOE",
+                    "role_name": "Security Reader",
+                    "role_state": "Eligible",
+                    "assignment_source": "Group",
+                    "source_group": "PIM-Security-Readers",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(
+            section.detail_table.item(0, 1).text(),
+            "Jane DOE → Security Reader",
+        )
+        self.assertEqual(
+            section.detail_table.item(0, 3).text(),
+            "Eligible · via PIM-Security-Readers",
+        )
+        self.assertEqual(section.detail_table.item(0, 4).text(), "")
+
+    def test_compact_identity_fallbacks_without_display_name_or_role_name(self):
+        from diffasaurus.core.report_history import _role_assignment_identity_label
+
+        key = f"{SCHEDULE_ACTIVE_DIRECT}{chr(31)}{ROLE_USER_ONE}"
+        after_map = {
+            key: {
+                "UserPrincipalName": "ada@example.com",
+                "RoleName": "",
+                "RoleDefinitionId": ROLE_DEF_GLOBAL_READER,
+            }
+        }
+        self.assertEqual(
+            _role_assignment_identity_label(key, "Added", {}, after_map),
+            "ada@example.com → " + ROLE_DEF_GLOBAL_READER,
+        )
+        after_map = {
+            key: {
+                "DisplayName": "",
+                "UserPrincipalName": "",
+                "UserId": ROLE_USER_ONE,
+                "RoleName": "Global Reader",
+            }
+        }
+        self.assertEqual(
+            _role_assignment_identity_label(key, "Added", {}, after_map),
+            f"{ROLE_USER_ONE} → Global Reader",
+        )
+
+    def test_recent_changes_summary_uses_assignment_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="Assignment schedule + User",
+            summary=ComparisonSummary(added=1, removed=1, changed=3, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 assignment added · 1 assignment removed · 3 assignments changed",
+        )
+
+    def test_comparison_summary_unit_uses_assignments(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "assignments")
 
 
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
