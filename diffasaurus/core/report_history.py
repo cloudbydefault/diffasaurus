@@ -54,6 +54,7 @@ FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
     "Entra_Users_Properties": ("Id", "UPN"),
     "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
+    "Intune_ManagedDevices_Compliance": ("ManagedDeviceId", "AzureADDeviceId", "SerialNumber"),
     "Intune_Devices_Autopilot": ("AutopilotObjectId", "SerialNumber"),
 }
 
@@ -77,6 +78,12 @@ FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
         "AutopilotObjectId",
         "AzureADDeviceId",
         "ManagedDeviceId",
+    ),
+    "Intune_ManagedDevices_Compliance": (
+        "DeviceName",
+        "SerialNumber",
+        "ManagedDeviceId",
+        "AzureADDeviceId",
     ),
 }
 
@@ -119,6 +126,7 @@ ANDROID_DEVICES_REPORT_FAMILY = "Intune_Android_Devices_Report"
 IOS_DEVICES_FAMILY = "Intune_iOS_Devices"
 IOS_DEVICES_REPORT_FAMILY = "Intune_iOS_Devices_Report"
 AUTOPILOT_DEVICES_FAMILY = "Intune_Devices_Autopilot"
+MANAGED_DEVICES_FAMILY = "Intune_ManagedDevices_Compliance"
 ROLE_ASSIGNMENTS_FAMILY = "Entra_Role_Assignments"
 ROLE_ASSIGNMENT_STABLE_KEY_COLUMNS = ("AssignmentScheduleId", "UserId")
 ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS = (
@@ -161,6 +169,21 @@ AUTOPILOT_DEVICES_EXCLUDED_COLUMNS = frozenset(
     }
 )
 
+MANAGED_DEVICES_EXCLUDED_COLUMNS = frozenset(
+    {
+        "DaysSinceLastSync",
+        "LastSyncDateTime",
+    }
+)
+
+MANAGED_DEVICES_USER_PRESENTATION_COLUMNS = frozenset(
+    {
+        "UserPrincipalName",
+        "UserDisplayName",
+        "EmailAddress",
+    }
+)
+
 ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS = frozenset(
     {
         "DisplayName",
@@ -180,6 +203,7 @@ FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     ANDROID_DEVICES_FAMILY: ANDROID_DEVICES_EXCLUDED_COLUMNS,
     IOS_DEVICES_FAMILY: IOS_DEVICES_EXCLUDED_COLUMNS,
     AUTOPILOT_DEVICES_FAMILY: AUTOPILOT_DEVICES_EXCLUDED_COLUMNS,
+    MANAGED_DEVICES_FAMILY: MANAGED_DEVICES_EXCLUDED_COLUMNS,
     ROLE_ASSIGNMENTS_FAMILY: ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS,
 }
 
@@ -229,6 +253,10 @@ def is_inventory_device_family(family: str | None) -> bool:
 
 def is_autopilot_devices_family(family: str | None) -> bool:
     return canonical_comparison_family(family) == AUTOPILOT_DEVICES_FAMILY
+
+
+def is_managed_devices_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == MANAGED_DEVICES_FAMILY
 
 
 def is_role_assignments_family(family: str | None) -> bool:
@@ -697,6 +725,12 @@ def _comparison_row_key(
             if value:
                 return value
         return ""
+    if is_managed_devices_family(family):
+        for column in ("ManagedDeviceId", "AzureADDeviceId", "SerialNumber"):
+            value = str(row.get(column, "") or "").strip()
+            if value:
+                return value
+        return ""
     if is_role_assignments_family(family):
         parts = [str(row.get(column, "") or "").strip() for column in key_columns]
         if key_columns == ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS:
@@ -779,6 +813,13 @@ def _should_skip_column_comparison(
     before_row: dict[str, str],
     after_row: dict[str, str],
 ) -> bool:
+    if is_managed_devices_family(family):
+        if column in MANAGED_DEVICES_USER_PRESENTATION_COLUMNS:
+            before_user_id = str(before_row.get("UserId", "") or "").strip()
+            after_user_id = str(after_row.get("UserId", "") or "").strip()
+            if before_user_id or after_user_id:
+                return True
+        return False
     if family != USER_PROPERTIES_FAMILY:
         return False
     if column in USER_PROPERTIES_MANAGER_COLUMNS:
@@ -968,6 +1009,35 @@ def _ios_device_identity_label(
     udid = _pick_identity_label(primary_row, fallback_row, ("UDID",))
     if udid:
         return udid
+    return key
+
+
+def _managed_device_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+    serial = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+    if device_name and serial:
+        return f"{device_name} · {serial}"
+    if device_name:
+        return device_name
+    if serial:
+        return serial
+    azure_ad_device_id = _pick_identity_label(primary_row, fallback_row, ("AzureADDeviceId",))
+    if azure_ad_device_id:
+        return azure_ad_device_id
+    managed_device_id = _pick_identity_label(primary_row, fallback_row, ("ManagedDeviceId",))
+    if managed_device_id:
+        return managed_device_id
     return key
 
 
@@ -1244,6 +1314,47 @@ def _attach_detail_identity(
         if user_principal_name:
             detail["UserPrincipalName"] = user_principal_name
         return
+    if is_managed_devices_family(family):
+        detail["identity"] = _managed_device_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+        if device_name:
+            detail["device_name"] = device_name
+        serial_number = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+        if serial_number:
+            detail["serial_number"] = serial_number
+        managed_device_id = _pick_identity_label(primary_row, fallback_row, ("ManagedDeviceId",))
+        if managed_device_id:
+            detail["managed_device_id"] = managed_device_id
+        azure_ad_device_id = _pick_identity_label(primary_row, fallback_row, ("AzureADDeviceId",))
+        if azure_ad_device_id:
+            detail["azure_ad_device_id"] = azure_ad_device_id
+        user_display_name = _pick_identity_label(primary_row, fallback_row, ("UserDisplayName",))
+        if user_display_name:
+            detail["user_display_name"] = user_display_name
+        user_principal_name = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("UserPrincipalName",),
+        )
+        if user_principal_name:
+            detail["UserPrincipalName"] = user_principal_name
+        user_id = _pick_identity_label(primary_row, fallback_row, ("UserId",))
+        if user_id:
+            detail["user_id"] = user_id
+        return
     if is_autopilot_devices_family(family):
         detail["identity"] = _autopilot_device_identity_label(
             key,
@@ -1441,6 +1552,8 @@ def _compare_snapshots(
         skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber"))
     if is_ios_devices_family(family):
         skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber", "UDID"))
+    if is_managed_devices_family(family):
+        skip_columns.update(("ManagedDeviceId", "AzureADDeviceId", "SerialNumber"))
     if is_autopilot_devices_family(family):
         skip_columns.update(("AutopilotObjectId", "SerialNumber"))
     excluded_columns = _comparison_excluded_columns(family)
