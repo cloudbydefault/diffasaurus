@@ -359,7 +359,7 @@ class FamilyChangeSection(QFrame):
                     {
                         "Change": detail.get("change", ""),
                         "Identity": detail.get("identity", ""),
-                        "Property": detail.get("property", ""),
+                        "Property": detail.get("column", detail.get("property", "")),
                         "Before": detail.get("before", ""),
                         "After": detail.get("after", ""),
                     }

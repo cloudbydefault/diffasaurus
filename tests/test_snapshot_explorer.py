@@ -1,6 +1,8 @@
 import os
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +19,57 @@ from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.main_window import DiffasaurusWindow
 from diffasaurus.ui.multi_column_filter import collect_distinct_values
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer, load_snapshot_payload
+
+
+def _drain_qt(*, thread_pools: list | None = None, events: int = 20) -> None:
+    for pool in thread_pools or []:
+        pool.waitForDone(5_000)
+    for _ in range(events):
+        QApplication.processEvents()
+        time.sleep(0.02)
+
+
+def _close_explorer(explorer: SnapshotExplorer) -> None:
+    explorer.close()
+    _drain_qt(thread_pools=[explorer.thread_pool])
+    explorer.deleteLater()
+    _drain_qt()
+
+
+def _close_main_window(window: DiffasaurusWindow) -> None:
+    pools = [window.thread_pool, window._entity_index_pool]
+    if hasattr(window, "snapshot_explorer"):
+        pools.append(window.snapshot_explorer.thread_pool)
+    window.close()
+    _drain_qt(thread_pools=pools)
+    window.deleteLater()
+    _drain_qt()
+
+
+@contextmanager
+def _isolated_main_window(*, report_dir: Path):
+    with (
+        patch(
+            "diffasaurus.ui.main_window.get_active_reports_dir",
+            return_value=report_dir,
+        ),
+        patch.object(DiffasaurusWindow, "refresh_history", lambda self: None),
+        patch(
+            "diffasaurus.ui.main_window.persistent_entity_index_enabled",
+            return_value=False,
+        ),
+        patch.object(
+            DiffasaurusWindow,
+            "_request_persistent_entity_sync",
+            lambda *args, **kwargs: None,
+        ),
+    ):
+        window = DiffasaurusWindow()
+        window.report_dir = report_dir
+        try:
+            yield window
+        finally:
+            _close_main_window(window)
 
 
 def _make_snapshot(path: Path, family: str = "TestFamily") -> ReportSnapshot:
@@ -185,8 +238,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 "Alex",
             )
         finally:
-            explorer.close()
-            explorer.thread_pool.waitForDone(1_000)
+            _close_explorer(explorer)
 
     def test_set_snapshots_alone_does_not_start_load(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -200,8 +252,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 self.assertFalse(explorer.progress.isVisible())
                 self.assertIsNone(explorer.loaded_path)
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_activate_loads_when_combo_index_stays_zero(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -224,8 +275,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 self.assertEqual(list(explorer.model.headers), ["RoleName", "Member"])
                 self.assertEqual(explorer.loaded_path, path_b)
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_changing_snapshot_within_family_updates_table(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -256,8 +306,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                     "Alice",
                 )
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_stale_async_result_cannot_replace_latest_selection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,8 +339,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 self.assertEqual(list(explorer.model.headers), ["ColB"])
                 self.assertEqual(explorer.loaded_path, path_b)
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_filters_cleared_after_snapshot_change(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -315,8 +363,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 self.assertEqual(explorer.search.text(), "")
                 self.assertEqual(explorer.proxy.active_filter_count(), 0)
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_dashboard_updates_after_snapshot_load(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -333,8 +380,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 _wait_for_snapshot_load(explorer)
                 self.assertEqual(explorer.dashboard.title.text(), "Identity Dashboard")
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_table_dashboard_table_preserves_selected_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -352,8 +398,7 @@ class SnapshotExplorerTests(unittest.TestCase):
                 self.assertEqual(list(explorer.model.headers), headers_after_load)
                 self.assertEqual(explorer.loaded_path, path)
             finally:
-                explorer.close()
-                explorer.thread_pool.waitForDone(1_000)
+                _close_explorer(explorer)
 
     def test_family_changed_off_explorer_page_does_not_start_load(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -365,31 +410,22 @@ class SnapshotExplorerTests(unittest.TestCase):
                 "FamilyA": [_make_snapshot(path_a, "FamilyA")],
                 "FamilyB": [_make_snapshot(path_b, "FamilyB")],
             }
-            with patch(
-                "diffasaurus.ui.main_window.get_active_reports_dir",
-                return_value=Path(directory),
-            ), patch.object(DiffasaurusWindow, "refresh_history", lambda self: None):
-                window = DiffasaurusWindow()
-                try:
-                    window.families = families
-                    window.family_combo.blockSignals(True)
-                    window.family_combo.clear()
-                    window.family_combo.addItems(list(families))
-                    window.family_combo.setCurrentText("FamilyA")
-                    window.family_combo.blockSignals(False)
-                    window.stack.setCurrentIndex(0)
+            with _isolated_main_window(report_dir=Path(directory)) as window:
+                window.families = families
+                window.family_combo.blockSignals(True)
+                window.family_combo.clear()
+                window.family_combo.addItems(list(families))
+                window.family_combo.setCurrentText("FamilyA")
+                window.family_combo.blockSignals(False)
+                window.stack.setCurrentIndex(0)
 
-                    window.family_combo.setCurrentText("FamilyB")
-                    window.family_changed()
-                    window.snapshot_explorer.thread_pool.waitForDone(200)
+                window.family_combo.setCurrentText("FamilyB")
+                window.family_changed()
+                window.snapshot_explorer.thread_pool.waitForDone(200)
 
-                    self.assertEqual(window.snapshot_explorer._generation, 0)
-                    self.assertFalse(window.snapshot_explorer.progress.isVisible())
-                    self.assertIsNone(window.snapshot_explorer.loaded_path)
-                finally:
-                    window.close()
-                    window.thread_pool.waitForDone(2_000)
-                    window.snapshot_explorer.thread_pool.waitForDone(2_000)
+                self.assertEqual(window.snapshot_explorer._generation, 0)
+                self.assertFalse(window.snapshot_explorer.progress.isVisible())
+                self.assertIsNone(window.snapshot_explorer.loaded_path)
 
     def test_family_changed_on_explorer_page_triggers_load(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -401,38 +437,29 @@ class SnapshotExplorerTests(unittest.TestCase):
                 "AccessPackages": [_make_snapshot(path_a, "AccessPackages")],
                 "RoleAssignments": [_make_snapshot(path_b, "RoleAssignments")],
             }
-            with patch(
-                "diffasaurus.ui.main_window.get_active_reports_dir",
-                return_value=Path(directory),
-            ), patch.object(DiffasaurusWindow, "refresh_history", lambda self: None):
-                window = DiffasaurusWindow()
-                try:
-                    window.families = families
-                    window.family_combo.blockSignals(True)
-                    window.family_combo.clear()
-                    window.family_combo.addItems(list(families))
-                    window.family_combo.setCurrentText("AccessPackages")
-                    window.family_combo.blockSignals(False)
-                    window.family_changed()
-                    window.show_page(7)
-                    _wait_for_snapshot_load(window.snapshot_explorer)
-                    self.assertEqual(
-                        list(window.snapshot_explorer.model.headers),
-                        ["AccessPackage", "State"],
-                    )
+            with _isolated_main_window(report_dir=Path(directory)) as window:
+                window.families = families
+                window.family_combo.blockSignals(True)
+                window.family_combo.clear()
+                window.family_combo.addItems(list(families))
+                window.family_combo.setCurrentText("AccessPackages")
+                window.family_combo.blockSignals(False)
+                window.family_changed()
+                window.show_page(7)
+                _wait_for_snapshot_load(window.snapshot_explorer)
+                self.assertEqual(
+                    list(window.snapshot_explorer.model.headers),
+                    ["AccessPackage", "State"],
+                )
 
-                    window.family_combo.setCurrentText("RoleAssignments")
-                    window.family_changed()
-                    _wait_for_snapshot_load(window.snapshot_explorer)
-                    self.assertEqual(
-                        list(window.snapshot_explorer.model.headers),
-                        ["RoleName", "Member"],
-                    )
-                    self.assertEqual(window.snapshot_explorer.loaded_path, path_b)
-                finally:
-                    window.close()
-                    window.thread_pool.waitForDone(2_000)
-                    window.snapshot_explorer.thread_pool.waitForDone(2_000)
+                window.family_combo.setCurrentText("RoleAssignments")
+                window.family_changed()
+                _wait_for_snapshot_load(window.snapshot_explorer)
+                self.assertEqual(
+                    list(window.snapshot_explorer.model.headers),
+                    ["RoleName", "Member"],
+                )
+                self.assertEqual(window.snapshot_explorer.loaded_path, path_b)
 
 
 if __name__ == "__main__":

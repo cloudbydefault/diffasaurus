@@ -574,6 +574,34 @@ class RecentChangesUiConsistencyTests(unittest.TestCase):
         self.assertIsNotNone(page.period_selector)
         page.close()
 
+    def test_generic_detail_property_uses_column_name(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = "Entra_Access_Packages"
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": "pkg-1",
+                    "column": "ModifiedDateTime",
+                    "before": "09/23/2025 09:43:10",
+                    "after": "08/13/2026 13:42:53",
+                    "identity": "Developer Access",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 2).text(), "ModifiedDateTime")
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Developer Access")
+
     def test_recent_changes_aggregation_and_apply_report_use_catalog_order(self):
         from diffasaurus.ui.recent_changes import RecentChangesPage
         from diffasaurus.ui.report_runner import CATALOG_FAMILY_ORDER
@@ -935,6 +963,247 @@ def membership_row(
     }
     row.update(extra)
     return row
+
+
+def access_package_row(
+    package_id: str,
+    package_name: str,
+    *,
+    policy_id: str = "",
+    policy_name: str = "",
+    package_description: str = "",
+    catalog_id: str = "catalog-1",
+    created: str = "2025-01-01T00:00:00Z",
+    modified: str = "2025-01-01T00:00:00Z",
+    policy_description: str = "",
+    policy_status: str = "",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "AccessPackageName": package_name,
+        "AccessPackageId": package_id,
+        "AccessPackageDescription": package_description,
+        "CatalogId": catalog_id,
+        "CreatedDateTime": created,
+        "ModifiedDateTime": modified,
+        "PolicyName": policy_name,
+        "PolicyId": policy_id,
+        "PolicyDescription": policy_description,
+        "PolicyStatus": policy_status,
+    }
+    row.update(extra)
+    return row
+
+
+class EntraAccessPackageComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Access_Packages"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = access_package_row("template-package", "Template Package")
+        for path, rows in (
+            (root / "Entra_Access_Packages_20260731-042100.csv", baseline_rows),
+            (root / "Entra_Access_Packages_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        self.assertEqual(
+            suggested_key(snapshots[0].headers, self.FAMILY),
+            "Access Package + Policy",
+        )
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            "Access Package + Policy",
+            self.FAMILY,
+        )
+
+    def test_two_policies_under_same_package_remain_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-1",
+                    policy_name="Standard Approval",
+                ),
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-2",
+                    policy_name="Manager Approval",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_same_package_id_does_not_collapse_policy_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-1",
+                    policy_name="Policy One",
+                ),
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-2",
+                    policy_name="Policy Two",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            composite = self._compare(baseline, latest)
+            package_only = compare_snapshots(baseline, latest, "AccessPackageId")
+            self.assertEqual(composite.stable, 2)
+            self.assertEqual(package_only.stable, 1)
+
+    def test_changed_policy_row_reports_friendly_identity_and_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        policy_id="policy-1",
+                        policy_name="Standard Approval",
+                        modified="2025-09-23T09:43:10Z",
+                        policy_status="Enabled",
+                    ),
+                ],
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        policy_id="policy-1",
+                        policy_name="Standard Approval",
+                        modified="2026-08-13T13:42:53Z",
+                        policy_status="Disabled",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(detail_identity(changed), "Developer Access → Standard Approval")
+            self.assertEqual(changed["column"], "ModifiedDateTime")
+            status_change = next(
+                detail for detail in result.details if detail["column"] == "PolicyStatus"
+            )
+            self.assertEqual(status_change["before"], "Enabled")
+            self.assertEqual(status_change["after"], "Disabled")
+
+    def test_package_without_policy_uses_package_name_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        package_description="Baseline description",
+                    ),
+                ],
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        package_description="Updated description",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(detail_identity(changed), "Developer Access")
+            self.assertEqual(changed["column"], "AccessPackageDescription")
+
+    def test_package_without_policy_is_not_discarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [access_package_row("pkg-1", "Developer Access")]
+            baseline, latest = self._write_pair(Path(directory), rows, rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 1)
+
+    def test_policy_added_and_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        policy_id="policy-1",
+                        policy_name="Standard Approval",
+                    ),
+                ],
+                [
+                    access_package_row(
+                        "pkg-1",
+                        "Developer Access",
+                        policy_id="policy-2",
+                        policy_name="Manager Approval",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.added, 1)
+            self.assertEqual(result.removed, 1)
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Developer Access → Manager Approval")
+            self.assertEqual(detail_identity(removed), "Developer Access → Standard Approval")
+
+    def test_row_reordering_does_not_create_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = [
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-1",
+                    policy_name="Policy One",
+                ),
+                access_package_row(
+                    "pkg-1",
+                    "Developer Access",
+                    policy_id="policy-2",
+                    policy_name="Policy Two",
+                ),
+            ]
+            latest_rows = list(reversed(baseline_rows))
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+            result = compare_snapshots(snapshots[0], snapshots[1], "UPN")
+            self.assertEqual(result.changed, 1)
 
 
 class EntraGroupMembershipComparisonTests(unittest.TestCase):

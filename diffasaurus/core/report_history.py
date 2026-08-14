@@ -82,16 +82,22 @@ COMPOSITE_KEY_DELIMITER = "\x1f"
 
 FAMILY_COMPOSITE_KEYS: dict[str, tuple[str, ...]] = {
     "Entra_Group_User_Memberships": ("UserId", "GroupId"),
+    "Entra_Access_Packages": ("AccessPackageId", "PolicyId"),
 }
 
 FAMILY_COMPOSITE_KEY_LABELS: dict[str, str] = {
     "Entra_Group_User_Memberships": "User + Group",
+    "Entra_Access_Packages": "Access Package + Policy",
 }
 
 FAMILY_RELATIONSHIP_IDENTITY: dict[str, dict[str, tuple[str, ...]]] = {
     "Entra_Group_User_Memberships": {
         "user": ("UserDisplayName", "UserPrincipalName", "UserId"),
         "group": ("GroupName", "GroupMail", "GroupId"),
+    },
+    "Entra_Access_Packages": {
+        "user": ("AccessPackageName", "AccessPackageId"),
+        "group": ("PolicyName", "PolicyId"),
     },
 }
 
@@ -484,6 +490,28 @@ def comparison_key_columns(
     return (key_column,)
 
 
+def _comparison_row_key(
+    row: dict[str, str],
+    *,
+    family: str | None,
+    key_column: str,
+    key_columns: tuple[str, ...],
+    use_composite: bool,
+) -> str:
+    if family == "Entra_Access_Packages":
+        package_id = str(row.get("AccessPackageId", "") or "").strip()
+        if not package_id:
+            return ""
+        policy_id = str(row.get("PolicyId", "") or "").strip()
+        if policy_id:
+            return f"{package_id}{COMPOSITE_KEY_DELIMITER}{policy_id}"
+        return package_id
+    if use_composite:
+        parts = [str(row.get(column, "") or "").strip() for column in key_columns]
+        return COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
+    return str(row.get(key_column, "") or "").strip()
+
+
 def identity_display_column(
     family: str | None,
     headers: list[str] | tuple[str, ...],
@@ -603,9 +631,17 @@ def _attach_detail_identity(
         )
         if composite_columns:
             parts = key.split(COMPOSITE_KEY_DELIMITER)
-            if len(parts) == len(composite_columns):
+            if family == "Entra_Group_User_Memberships" and len(parts) == len(composite_columns):
                 detail["user_id"] = parts[0]
                 detail["group_id"] = parts[1]
+        if family == "Entra_Access_Packages":
+            if COMPOSITE_KEY_DELIMITER in key:
+                package_id, policy_id = key.split(COMPOSITE_KEY_DELIMITER, 1)
+            else:
+                package_id, policy_id = key, ""
+            detail["access_package_id"] = package_id
+            if policy_id:
+                detail["policy_id"] = policy_id
         before_row = before_map.get(key, {})
         after_row = after_map.get(key, {})
         if change == "Added":
@@ -692,14 +728,13 @@ def _compare_snapshots(
     def keyed(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
         result = {}
         for row in rows:
-            if use_composite:
-                parts = [
-                    str(row.get(column, "") or "").strip()
-                    for column in key_columns
-                ]
-                key = COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
-            else:
-                key = str(row.get(key_column, "") or "").strip()
+            key = _comparison_row_key(
+                row,
+                family=family,
+                key_column=key_column,
+                key_columns=key_columns,
+                use_composite=use_composite,
+            )
             if key:
                 result[key] = row
         return result
