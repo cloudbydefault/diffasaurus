@@ -14,8 +14,10 @@ from diffasaurus.core.report_history import detail_identity
 
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
 USER_ACTIVITY_FAMILY = "Entra_Users_Activity"
+AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
+USER_ORIENTED_FAMILIES = frozenset({USER_ACTIVITY_FAMILY, AUTH_METHODS_HYBRID_FAMILY})
 MEMBERSHIP_IDENTITY_MIN_WIDTH = 300
-USER_ACTIVITY_PROPERTY_MIN_WIDTH = 240
+USER_ORIENTED_PROPERTY_MIN_WIDTH = 240
 MEMBERSHIP_ROW_MIN_HEIGHT = 48
 IDENTITY_ARROW = " → "
 IDENTITY_SEPARATOR = " · "
@@ -37,6 +39,33 @@ USER_ACTIVITY_PROPERTY_LABELS: dict[str, str] = {
     "LastInteractiveSignInDateTime": "Last interactive sign-in",
     "LastNonInteractiveSignInDateTime": "Last non-interactive sign-in",
     "LastSuccessfulSignInDateTime": "Last successful sign-in",
+}
+
+AUTH_METHODS_HYBRID_PROPERTY_LABELS: dict[str, str] = {
+    "DisplayName": "Display name",
+    "UPN": "User principal name",
+    "UserType": "User type",
+    "AccountEnabled": "Account enabled",
+    "JobTitle": "Job title",
+    "CompanyName": "Company",
+    "Department": "Department",
+    "Country": "Country",
+    "City": "City",
+    "IsSystemPreferredAuthenticationMethodEnabled": "System-preferred authentication enabled",
+    "UserPreferredMethodForSecondaryAuthentication": "User-preferred secondary authentication",
+    "SystemPreferredAuthenticationMethod": "System-preferred authentication method",
+    "AuthenticationMethods": "Authentication methods",
+    "IsAdmin": "Administrator",
+    "IsMfaRegistered": "MFA registered",
+    "IsMfaCapable": "MFA capable",
+    "IsPasswordlessCapable": "Passwordless capable",
+    "IsSsprRegistered": "SSPR registered",
+    "IsSsprEnabled": "SSPR enabled",
+    "IsSsprCapable": "SSPR capable",
+    "DefaultMfaMethod": "Default MFA method",
+    "MethodsRegistered": "Methods registered",
+    "SystemPreferredAuthenticationMethods": "System-preferred authentication methods",
+    "ReportSource": "Report source",
 }
 
 CHANGE_COLORS = {
@@ -68,18 +97,27 @@ def identity_display_text(detail: dict[str, str], family: str | None) -> str:
     return identity
 
 
+def _family_property_labels(family: str | None) -> dict[str, str]:
+    if family == USER_ACTIVITY_FAMILY:
+        return USER_ACTIVITY_PROPERTY_LABELS
+    if family == AUTH_METHODS_HYBRID_FAMILY:
+        return AUTH_METHODS_HYBRID_PROPERTY_LABELS
+    return {}
+
+
 def property_display_text(column: str, family: str | None, *, change: str = "") -> str:
-    if family != USER_ACTIVITY_FAMILY:
+    if family not in USER_ORIENTED_FAMILIES:
         return column
     if not column and change in {"Added", "Removed"}:
         return "User"
-    return USER_ACTIVITY_PROPERTY_LABELS.get(column, column)
+    return _family_property_labels(family).get(column, column)
 
 
 def property_tooltip(column: str, family: str | None) -> str:
-    if family != USER_ACTIVITY_FAMILY or not column:
+    labels = _family_property_labels(family)
+    if family not in USER_ORIENTED_FAMILIES or not column:
         return ""
-    label = USER_ACTIVITY_PROPERTY_LABELS.get(column, column)
+    label = labels.get(column, column)
     if label == column:
         return column
     return f"{label}\nCSV field: {column}"
@@ -87,10 +125,12 @@ def property_tooltip(column: str, family: str | None) -> str:
 
 def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
     identity = identity_display_text(detail, family)
-    if family == USER_ACTIVITY_FAMILY:
+    if family in USER_ORIENTED_FAMILIES:
         parts = [identity]
-        if detail.get("user_id"):
+        if family == USER_ACTIVITY_FAMILY and detail.get("user_id"):
             parts.append(f"UserId: {detail['user_id']}")
+        if family == AUTH_METHODS_HYBRID_FAMILY and detail.get("microsoft_report_id"):
+            parts.append(f"MicrosoftReportId: {detail['microsoft_report_id']}")
         upn = detail.get("UPN") or (
             detail.get("key", "") if "@" in detail.get("key", "") else ""
         )
@@ -131,7 +171,7 @@ def configure_comparison_detail_table(
         if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         return
-    if family == USER_ACTIVITY_FAMILY:
+    if family == USER_ACTIVITY_FAMILY or family == AUTH_METHODS_HYBRID_FAMILY:
         table.setWordWrap(False)
         table.setItemDelegateForColumn(1, None)
         table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -141,8 +181,8 @@ def configure_comparison_detail_table(
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        if table.columnWidth(2) < USER_ACTIVITY_PROPERTY_MIN_WIDTH:
-            table.setColumnWidth(2, USER_ACTIVITY_PROPERTY_MIN_WIDTH)
+        if table.columnWidth(2) < USER_ORIENTED_PROPERTY_MIN_WIDTH:
+            table.setColumnWidth(2, USER_ORIENTED_PROPERTY_MIN_WIDTH)
         return
     table.setWordWrap(False)
     table.setItemDelegateForColumn(1, None)

@@ -231,7 +231,10 @@ class FamilyChangeSection(QFrame):
                     f"{item.summary.removed} removed · "
                     f"{item.summary.changed} modified"
                 )
-            elif item.family == "Entra_Users_Activity":
+            elif item.family in {
+                "Entra_Users_Activity",
+                "Entra_Users_AuthenticationMethods_Hybrid",
+            }:
                 added = item.summary.added
                 removed = item.summary.removed
                 changed = item.summary.changed
@@ -364,7 +367,10 @@ class FamilyChangeSection(QFrame):
                 has_more = True
                 break
             if "change" in detail and "Change" not in detail:
-                if self._family == "Entra_Users_Activity":
+                if self._family in {
+                    "Entra_Users_Activity",
+                    "Entra_Users_AuthenticationMethods_Hybrid",
+                }:
                     matching.append(detail)
                 else:
                     matching.append(
