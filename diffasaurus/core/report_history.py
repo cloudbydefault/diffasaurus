@@ -51,6 +51,7 @@ PREFERRED_KEYS = (
 FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
     "Entra_Users_Activity": ("UserId", "UPN"),
     "Entra_Users_AuthenticationMethods_Hybrid": ("MicrosoftReportId", "UPN"),
+    "Entra_Users_Properties": ("Id", "UPN"),
     "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
 }
@@ -104,9 +105,13 @@ FAMILY_RELATIONSHIP_IDENTITY: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
+USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
 
 FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     AUTH_METHODS_HYBRID_FAMILY: frozenset({"LastUpdatedDateTime"}),
+    USER_PROPERTIES_FAMILY: frozenset(
+        {"ManagerStatus", "ManagerError", "SponsorsStatus", "SponsorsError"}
+    ),
 }
 
 AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
@@ -117,6 +122,20 @@ AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
         "SystemPreferredAuthenticationMethod",
     }
 )
+
+USER_PROPERTIES_COLLECTION_COLUMNS = frozenset(
+    {
+        "Identities",
+        "BusinessPhones",
+        "OtherMails",
+        "ProxyAddresses",
+        "IMAddresses",
+        "Sponsors",
+    }
+)
+
+USER_PROPERTIES_MANAGER_COLUMNS = frozenset({"ManagerDisplayName", "ManagerUPN"})
+USER_PROPERTIES_SPONSOR_COLUMNS = frozenset({"Sponsors"})
 
 _COLLECTION_VALUE_SPLIT_RE = re.compile(r"\s*;\s*")
 
@@ -552,11 +571,58 @@ def detail_identity(detail: dict[str, str]) -> str:
 def comparison_summary_unit(family: str | None) -> str:
     if family == "Entra_Group_User_Memberships":
         return "memberships"
-    if family in {"Entra_Users_Activity", AUTH_METHODS_HYBRID_FAMILY}:
+    if family in {
+        "Entra_Users_Activity",
+        AUTH_METHODS_HYBRID_FAMILY,
+        USER_PROPERTIES_FAMILY,
+    }:
         return "users"
     if family in _DEVICE_COMPARISON_FAMILIES:
         return "devices"
     return "rows"
+
+
+def _graph_status_code(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _manager_coverage_known(row: dict[str, str]) -> bool:
+    status = _graph_status_code(row.get("ManagerStatus", ""))
+    if status is None:
+        return False
+    if 200 <= status < 300:
+        return True
+    return status == 404
+
+
+def _sponsors_coverage_known(row: dict[str, str]) -> bool:
+    status = _graph_status_code(row.get("SponsorsStatus", ""))
+    return status is not None and 200 <= status < 300
+
+
+def _should_skip_column_comparison(
+    column: str,
+    family: str | None,
+    before_row: dict[str, str],
+    after_row: dict[str, str],
+) -> bool:
+    if family != USER_PROPERTIES_FAMILY:
+        return False
+    if column in USER_PROPERTIES_MANAGER_COLUMNS:
+        return not (
+            _manager_coverage_known(before_row) and _manager_coverage_known(after_row)
+        )
+    if column in USER_PROPERTIES_SPONSOR_COLUMNS:
+        return not (
+            _sponsors_coverage_known(before_row) and _sponsors_coverage_known(after_row)
+        )
+    return False
 
 
 def _parse_collection_tokens(value: str) -> frozenset[str]:
@@ -577,6 +643,8 @@ def _column_values_equal(
     family: str | None,
 ) -> bool:
     if family == AUTH_METHODS_HYBRID_FAMILY and column in AUTH_METHODS_HYBRID_COLLECTION_COLUMNS:
+        return _parse_collection_tokens(before_value) == _parse_collection_tokens(after_value)
+    if family == USER_PROPERTIES_FAMILY and column in USER_PROPERTIES_COLLECTION_COLUMNS:
         return _parse_collection_tokens(before_value) == _parse_collection_tokens(after_value)
     return before_value == after_value
 
@@ -782,6 +850,30 @@ def _attach_detail_identity(
         if upn:
             detail["UPN"] = upn
         return
+    if family == USER_PROPERTIES_FAMILY:
+        detail["identity"] = _display_name_upn_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        entra_id = _pick_identity_label(primary_row, fallback_row, ("Id",))
+        if not entra_id and key and "@" not in key:
+            entra_id = key
+        if entra_id:
+            detail["user_id"] = entra_id
+        upn = _pick_identity_label(primary_row, fallback_row, ("UPN",))
+        if upn:
+            detail["UPN"] = upn
+        return
     identity_columns = FAMILY_IDENTITY_DISPLAY.get(family or "", ())
     if identity_columns:
         before_row = before_map.get(key, {})
@@ -924,8 +1016,12 @@ def _compare_snapshots(
         for column in common:
             if column in skip_columns or column in excluded_columns:
                 continue
-            before_value = str(before_map[key].get(column, "") or "").strip()
-            after_value = str(after_map[key].get(column, "") or "").strip()
+            before_row = before_map[key]
+            after_row = after_map[key]
+            if _should_skip_column_comparison(column, family, before_row, after_row):
+                continue
+            before_value = str(before_row.get(column, "") or "").strip()
+            after_value = str(after_row.get(column, "") or "").strip()
             if not _column_values_equal(
                 before_value,
                 after_value,

@@ -234,6 +234,7 @@ class FamilyChangeSection(QFrame):
             elif item.family in {
                 "Entra_Users_Activity",
                 "Entra_Users_AuthenticationMethods_Hybrid",
+                "Entra_Users_Properties",
             }:
                 added = item.summary.added
                 removed = item.summary.removed
@@ -370,6 +371,7 @@ class FamilyChangeSection(QFrame):
                 if self._family in {
                     "Entra_Users_Activity",
                     "Entra_Users_AuthenticationMethods_Hybrid",
+                    "Entra_Users_Properties",
                 }:
                     matching.append(detail)
                 else:

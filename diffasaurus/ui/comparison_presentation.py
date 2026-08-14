@@ -15,7 +15,14 @@ from diffasaurus.core.report_history import detail_identity
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
 USER_ACTIVITY_FAMILY = "Entra_Users_Activity"
 AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
-USER_ORIENTED_FAMILIES = frozenset({USER_ACTIVITY_FAMILY, AUTH_METHODS_HYBRID_FAMILY})
+USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
+USER_ORIENTED_FAMILIES = frozenset(
+    {
+        USER_ACTIVITY_FAMILY,
+        AUTH_METHODS_HYBRID_FAMILY,
+        USER_PROPERTIES_FAMILY,
+    }
+)
 MEMBERSHIP_IDENTITY_MIN_WIDTH = 300
 USER_ORIENTED_PROPERTY_MIN_WIDTH = 240
 MEMBERSHIP_ROW_MIN_HEIGHT = 48
@@ -68,6 +75,48 @@ AUTH_METHODS_HYBRID_PROPERTY_LABELS: dict[str, str] = {
     "ReportSource": "Report source",
 }
 
+USER_PROPERTIES_PROPERTY_LABELS: dict[str, str] = {
+    "Id": "User ID",
+    "DisplayName": "Display name",
+    "GivenName": "Given name",
+    "Surname": "Surname",
+    "UPN": "User principal name",
+    "Mail": "Mail",
+    "MailNickname": "Mail nickname",
+    "UserType": "User type",
+    "AccountEnabled": "Account enabled",
+    "CreatedDateTime": "Created",
+    "Identities": "Sign-in identities",
+    "StreetAddress": "Street address",
+    "City": "City",
+    "State": "State",
+    "PostalCode": "Postal code",
+    "Country": "Country",
+    "BusinessPhones": "Business phones",
+    "MobilePhone": "Mobile phone",
+    "OtherMails": "Other email addresses",
+    "ProxyAddresses": "Proxy addresses",
+    "IMAddresses": "IM addresses",
+    "JobTitle": "Job title",
+    "CompanyName": "Company",
+    "Department": "Department",
+    "OfficeLocation": "Office location",
+    "EmployeeId": "Employee ID",
+    "EmployeeType": "Employee type",
+    "EmployeeHireDate": "Employee hire date",
+    "UsageLocation": "Usage location",
+    "PreferredLanguage": "Preferred language",
+    "PreferredDataLocation": "Preferred data location",
+    "OnPremisesSyncEnabled": "On-premises sync enabled",
+    "OnPremisesLastSyncDateTime": "Last on-premises sync",
+    "OnPremisesDistinguishedName": "On-premises distinguished name",
+    "OnPremisesImmutableId": "On-premises immutable ID",
+    "ExtensionAttributes": "Extension attributes",
+    "ManagerDisplayName": "Manager display name",
+    "ManagerUPN": "Manager UPN",
+    "Sponsors": "Sponsors",
+}
+
 CHANGE_COLORS = {
     "Added": "#4fd1a5",
     "Removed": "#fb7185",
@@ -102,6 +151,8 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return USER_ACTIVITY_PROPERTY_LABELS
     if family == AUTH_METHODS_HYBRID_FAMILY:
         return AUTH_METHODS_HYBRID_PROPERTY_LABELS
+    if family == USER_PROPERTIES_FAMILY:
+        return USER_PROPERTIES_PROPERTY_LABELS
     return {}
 
 
@@ -131,6 +182,8 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
             parts.append(f"UserId: {detail['user_id']}")
         if family == AUTH_METHODS_HYBRID_FAMILY and detail.get("microsoft_report_id"):
             parts.append(f"MicrosoftReportId: {detail['microsoft_report_id']}")
+        if family == USER_PROPERTIES_FAMILY and detail.get("user_id"):
+            parts.append(f"Id: {detail['user_id']}")
         upn = detail.get("UPN") or (
             detail.get("key", "") if "@" in detail.get("key", "") else ""
         )
@@ -171,7 +224,7 @@ def configure_comparison_detail_table(
         if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         return
-    if family == USER_ACTIVITY_FAMILY or family == AUTH_METHODS_HYBRID_FAMILY:
+    if family in USER_ORIENTED_FAMILIES:
         table.setWordWrap(False)
         table.setItemDelegateForColumn(1, None)
         table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -181,6 +234,8 @@ def configure_comparison_detail_table(
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
+            table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         if table.columnWidth(2) < USER_ORIENTED_PROPERTY_MIN_WIDTH:
             table.setColumnWidth(2, USER_ORIENTED_PROPERTY_MIN_WIDTH)
         return
