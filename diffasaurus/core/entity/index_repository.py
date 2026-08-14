@@ -381,32 +381,18 @@ class EntityIndexRepository:
         if not needle:
             return []
         pattern = _escape_like(needle) + "%"
-        suggestions: set[str] = set()
         with _connect(self._db_path, readonly=self._readonly) as connection:
-            for row in connection.execute(
+            rows = connection.execute(
                 """
-                SELECT DISTINCT ao.normalized_value AS display_value
-                FROM alias_observations ao
-                JOIN entities e ON e.source_id = ao.source_id AND e.primary_id = ao.immutable_id
-                WHERE e.source_id=? AND e.entity_type=? AND ao.normalized_value LIKE ? ESCAPE '\\'
+                SELECT DISTINCT ea.display_value
+                FROM entity_aliases ea
+                JOIN entities e ON e.id = ea.entity_id
+                WHERE e.source_id=? AND e.entity_type=? AND ea.normalized_value LIKE ? ESCAPE '\\'
                 LIMIT ?
                 """,
                 (self._source_id, entity_type, pattern, limit),
-            ):
-                suggestions.add(row["display_value"])
-            remaining = limit - len(suggestions)
-            if remaining > 0:
-                for row in connection.execute(
-                    """
-                    SELECT DISTINCT ea.display_value
-                    FROM entity_aliases ea
-                    JOIN entities e ON e.id = ea.entity_id
-                    WHERE e.source_id=? AND e.entity_type=? AND ea.normalized_value LIKE ? ESCAPE '\\'
-                    LIMIT ?
-                    """,
-                    (self._source_id, entity_type, pattern, remaining),
-                ):
-                    suggestions.add(row["display_value"])
+            ).fetchall()
+        suggestions = {row["display_value"] for row in rows}
         return sorted(suggestions, key=str.casefold)[:limit]
 
     def _load_entity_by_id(
