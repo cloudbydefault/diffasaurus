@@ -1039,6 +1039,68 @@ def user_activity_row(
     return row
 
 
+def auth_methods_hybrid_row(
+    microsoft_report_id: str,
+    *,
+    display_name: str = "",
+    upn: str = "",
+    user_type: str = "Member",
+    account_enabled: str = "True",
+    job_title: str = "",
+    company_name: str = "",
+    department: str = "",
+    country: str = "",
+    city: str = "",
+    is_system_preferred_enabled: str = "True",
+    user_preferred_secondary: str = "push",
+    system_preferred_method: str = "push",
+    authentication_methods: str = "microsoftAuthenticatorPush",
+    is_admin: str = "False",
+    is_mfa_registered: str = "True",
+    is_mfa_capable: str = "True",
+    is_passwordless_capable: str = "False",
+    is_sspr_registered: str = "False",
+    is_sspr_enabled: str = "False",
+    is_sspr_capable: str = "False",
+    default_mfa_method: str = "microsoftAuthenticatorPush",
+    methods_registered: str = "microsoftAuthenticatorPush",
+    system_preferred_methods: str = "push",
+    last_updated: str = "2026-08-12T12:00:00Z",
+    report_source: str = "Microsoft authenticationMethods/userRegistrationDetails",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "DisplayName": display_name,
+        "UPN": upn,
+        "UserType": user_type,
+        "AccountEnabled": account_enabled,
+        "JobTitle": job_title,
+        "CompanyName": company_name,
+        "Department": department,
+        "Country": country,
+        "City": city,
+        "IsSystemPreferredAuthenticationMethodEnabled": is_system_preferred_enabled,
+        "UserPreferredMethodForSecondaryAuthentication": user_preferred_secondary,
+        "SystemPreferredAuthenticationMethod": system_preferred_method,
+        "AuthenticationMethods": authentication_methods,
+        "MicrosoftReportId": microsoft_report_id,
+        "IsAdmin": is_admin,
+        "IsMfaRegistered": is_mfa_registered,
+        "IsMfaCapable": is_mfa_capable,
+        "IsPasswordlessCapable": is_passwordless_capable,
+        "IsSsprRegistered": is_sspr_registered,
+        "IsSsprEnabled": is_sspr_enabled,
+        "IsSsprCapable": is_sspr_capable,
+        "DefaultMfaMethod": default_mfa_method,
+        "MethodsRegistered": methods_registered,
+        "SystemPreferredAuthenticationMethods": system_preferred_methods,
+        "LastUpdatedDateTime": last_updated,
+        "ReportSource": report_source,
+    }
+    row.update(extra)
+    return row
+
+
 class EntraAccessPackageComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Access_Packages"
 
@@ -1577,6 +1639,452 @@ class EntraUserActivityPresentationTests(unittest.TestCase):
         from diffasaurus.core.report_history import comparison_summary_unit
 
         self.assertEqual(comparison_summary_unit("Entra_Users_Activity"), "users")
+
+
+class EntraAuthMethodsHybridComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = auth_methods_hybrid_row("template-id", upn="template@example.com")
+        for path, rows in (
+            (
+                root / "Entra_Users_AuthenticationMethods_Hybrid_20260731-042100.csv",
+                baseline_rows,
+            ),
+            (
+                root / "Entra_Users_AuthenticationMethods_Hybrid_20260804-042100.csv",
+                latest_rows,
+            ),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_microsoft_report_id_is_preferred_over_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                    ),
+                ],
+            )
+            self.assertEqual(suggested_key(baseline.headers, self.FAMILY), "MicrosoftReportId")
+
+    def test_upn_rename_stays_same_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada.old@example.com",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada.new@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "UPN")
+            self.assertEqual(changed["before"], "ada.old@example.com")
+            self.assertEqual(changed["after"], "ada.new@example.com")
+
+    def test_changed_identity_uses_latest_display_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada",
+                        upn="ada@example.com",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            changed = next(detail for detail in result.details if detail["column"] == "DisplayName")
+            self.assertEqual(detail_identity(changed), "Ada Lovelace · ada@example.com")
+
+    def test_added_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertEqual(detail_identity(added), "Ada Lovelace · ada@example.com")
+            self.assertEqual(
+                added["microsoft_report_id"],
+                "00000000-0000-0000-0000-000000000001",
+            )
+
+    def test_removed_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Grace Hopper",
+                        upn="grace@example.com",
+                    ),
+                ],
+                [],
+            )
+            result = self._compare(baseline, latest)
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(removed), "Grace Hopper · grace@example.com")
+
+    def test_last_updated_only_change_is_suppressed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        last_updated="2026-08-12T12:00:00Z",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        last_updated="2026-08-13T15:18:14Z",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 0))
+            self.assertFalse(any(detail["column"] == "LastUpdatedDateTime" for detail in result.details))
+
+    def test_real_mfa_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        is_mfa_registered="False",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        is_mfa_registered="True",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "IsMfaRegistered")
+            self.assertEqual(changed["before"], "False")
+            self.assertEqual(changed["after"], "True")
+
+    def test_last_updated_plus_real_change_emits_only_real_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        default_mfa_method="push",
+                        last_updated="2026-08-12T12:00:00Z",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        default_mfa_method="oath",
+                        last_updated="2026-08-13T15:18:14Z",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"DefaultMfaMethod"})
+
+    def test_collection_reorder_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        methods_registered="email ; microsoftAuthenticatorPush",
+                        authentication_methods="email ; microsoftAuthenticatorPush",
+                        system_preferred_methods="push ; oath",
+                        system_preferred_method="push ; oath",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        methods_registered="microsoftAuthenticatorPush ; email",
+                        authentication_methods="microsoftAuthenticatorPush ; email",
+                        system_preferred_methods="oath ; push",
+                        system_preferred_method="oath ; push",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_collection_content_change_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        methods_registered="email ; microsoftAuthenticatorPush",
+                    ),
+                ],
+                [
+                    auth_methods_hybrid_row(
+                        "00000000-0000-0000-0000-000000000001",
+                        display_name="Ada Lovelace",
+                        upn="ada@example.com",
+                        methods_registered="email ; oath",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "MethodsRegistered")
+            self.assertEqual(changed["before"], "email ; microsoftAuthenticatorPush")
+            self.assertEqual(changed["after"], "email ; oath")
+
+    def test_legacy_snapshot_without_microsoft_report_id_falls_back_to_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_headers = {
+                "DisplayName": "Ada",
+                "UPN": "ada@example.com",
+                "UserType": "Member",
+                "AccountEnabled": "True",
+                "IsMfaRegistered": "True",
+            }
+            for stamp, upn in (
+                ("20260731-042100", "ada.old@example.com"),
+                ("20260804-042100", "ada.new@example.com"),
+            ):
+                row = dict(legacy_headers)
+                row["UPN"] = upn
+                write_report(
+                    root / f"Entra_Users_AuthenticationMethods_Hybrid_{stamp}.csv",
+                    [row],
+                )
+            snapshots = scan_report_history(root)[self.FAMILY]
+            self.assertEqual(suggested_key(snapshots[0].headers, self.FAMILY), "UPN")
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                "UPN",
+                self.FAMILY,
+            )
+            self.assertEqual((result.added, result.removed), (1, 1))
+
+    def test_generic_family_still_compares_last_updated_datetime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [
+                    {
+                        "UPN": "ada@example.com",
+                        "Department": "R&D",
+                        "LastUpdatedDateTime": "2026-08-12T12:00:00Z",
+                    },
+                ],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [
+                    {
+                        "UPN": "ada@example.com",
+                        "Department": "R&D",
+                        "LastUpdatedDateTime": "2026-08-13T15:18:14Z",
+                    },
+                ],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            result = compare_snapshots(snapshots[0], snapshots[1], "UPN")
+            changed_columns = {
+                detail["column"] for detail in result.details if detail["change"] == "Changed"
+            }
+            self.assertIn("LastUpdatedDateTime", changed_columns)
+
+
+class EntraAuthMethodsHybridPresentationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        family = "Entra_Users_AuthenticationMethods_Hybrid"
+        self.assertEqual(property_display_text("IsMfaRegistered", family), "MFA registered")
+        self.assertEqual(property_display_text("DefaultMfaMethod", family), "Default MFA method")
+        self.assertEqual(
+            property_display_text("MethodsRegistered", family),
+            "Methods registered",
+        )
+        self.assertEqual(
+            property_display_text("AuthenticationMethods", family),
+            "Authentication methods",
+        )
+        self.assertEqual(
+            property_display_text("", family, change="Added"),
+            "User",
+        )
+        tooltip = property_tooltip("IsMfaCapable", family)
+        self.assertIn("MFA capable", tooltip)
+        self.assertIn("CSV field: IsMfaCapable", tooltip)
+
+    def test_identity_tooltip_includes_microsoft_report_id(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Ada Lovelace · ada@example.com",
+            "microsoft_report_id": "00000000-0000-0000-0000-000000000001",
+            "UPN": "ada@example.com",
+            "key": "00000000-0000-0000-0000-000000000001",
+        }
+        tooltip = identity_tooltip(detail, "Entra_Users_AuthenticationMethods_Hybrid")
+        self.assertIn("Ada Lovelace · ada@example.com", tooltip)
+        self.assertIn("MicrosoftReportId: 00000000-0000-0000-0000-000000000001", tooltip)
+        self.assertIn("UPN: ada@example.com", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_property(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = "Entra_Users_AuthenticationMethods_Hybrid"
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": "00000000-0000-0000-0000-000000000001",
+                    "identity": "Ada Lovelace · ada@example.com",
+                    "column": "IsMfaRegistered",
+                    "before": "False",
+                    "after": "True",
+                    "microsoft_report_id": "00000000-0000-0000-0000-000000000001",
+                    "UPN": "ada@example.com",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(
+            section.detail_table.item(0, 1).text(),
+            "Ada Lovelace · ada@example.com",
+        )
+        self.assertEqual(section.detail_table.item(0, 2).text(), "MFA registered")
+
+    def test_recent_changes_summary_uses_user_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family="Entra_Users_AuthenticationMethods_Hybrid",
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="MicrosoftReportId",
+            summary=ComparisonSummary(added=1, removed=1, changed=3, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 user added · 1 user removed · 3 users changed",
+        )
+
+    def test_comparison_summary_unit_uses_users(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(
+            comparison_summary_unit("Entra_Users_AuthenticationMethods_Hybrid"),
+            "users",
+        )
+
 
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Group_User_Memberships"

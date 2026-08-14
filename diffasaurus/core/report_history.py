@@ -50,6 +50,7 @@ PREFERRED_KEYS = (
 
 FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
     "Entra_Users_Activity": ("UserId", "UPN"),
+    "Entra_Users_AuthenticationMethods_Hybrid": ("MicrosoftReportId", "UPN"),
     "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
 }
@@ -101,6 +102,23 @@ FAMILY_RELATIONSHIP_IDENTITY: dict[str, dict[str, tuple[str, ...]]] = {
         "group": ("PolicyName", "PolicyId"),
     },
 }
+
+AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
+
+FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
+    AUTH_METHODS_HYBRID_FAMILY: frozenset({"LastUpdatedDateTime"}),
+}
+
+AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
+    {
+        "AuthenticationMethods",
+        "MethodsRegistered",
+        "SystemPreferredAuthenticationMethods",
+        "SystemPreferredAuthenticationMethod",
+    }
+)
+
+_COLLECTION_VALUE_SPLIT_RE = re.compile(r"\s*;\s*")
 
 _ANALYSIS_CACHE: dict[
     tuple[str, str, str, int, int],
@@ -534,11 +552,33 @@ def detail_identity(detail: dict[str, str]) -> str:
 def comparison_summary_unit(family: str | None) -> str:
     if family == "Entra_Group_User_Memberships":
         return "memberships"
-    if family == "Entra_Users_Activity":
+    if family in {"Entra_Users_Activity", AUTH_METHODS_HYBRID_FAMILY}:
         return "users"
     if family in _DEVICE_COMPARISON_FAMILIES:
         return "devices"
     return "rows"
+
+
+def _parse_collection_tokens(value: str) -> frozenset[str]:
+    if not value or not value.strip():
+        return frozenset()
+    return frozenset(
+        token.strip()
+        for token in _COLLECTION_VALUE_SPLIT_RE.split(value.strip())
+        if token.strip()
+    )
+
+
+def _column_values_equal(
+    before_value: str,
+    after_value: str,
+    *,
+    column: str,
+    family: str | None,
+) -> bool:
+    if family == AUTH_METHODS_HYBRID_FAMILY and column in AUTH_METHODS_HYBRID_COLLECTION_COLUMNS:
+        return _parse_collection_tokens(before_value) == _parse_collection_tokens(after_value)
+    return before_value == after_value
 
 
 def _identity_label(
@@ -612,7 +652,7 @@ def _relationship_identity_label(
     return user or group or key
 
 
-def _user_activity_identity_label(
+def _display_name_upn_identity_label(
     key: str,
     change: str,
     before_map: dict[str, dict[str, str]],
@@ -633,6 +673,15 @@ def _user_activity_identity_label(
     if display_name:
         return display_name
     return key
+
+
+def _user_activity_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    return _display_name_upn_identity_label(key, change, before_map, after_map)
 
 
 def _attach_detail_identity(
@@ -701,6 +750,34 @@ def _attach_detail_identity(
             user_id = key
         if user_id:
             detail["user_id"] = user_id
+        upn = _pick_identity_label(primary_row, fallback_row, ("UPN",))
+        if upn:
+            detail["UPN"] = upn
+        return
+    if family == AUTH_METHODS_HYBRID_FAMILY:
+        detail["identity"] = _display_name_upn_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        microsoft_report_id = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("MicrosoftReportId",),
+        )
+        if not microsoft_report_id and key and "@" not in key:
+            microsoft_report_id = key
+        if microsoft_report_id:
+            detail["microsoft_report_id"] = microsoft_report_id
         upn = _pick_identity_label(primary_row, fallback_row, ("UPN",))
         if upn:
             detail["UPN"] = upn
@@ -799,6 +876,7 @@ def _compare_snapshots(
     details: list[dict[str, str]] = []
     display_column = identity_display_column(family, common) if include_details else ""
     skip_columns = set(key_columns)
+    excluded_columns = FAMILY_COMPARISON_EXCLUDED_COLUMNS.get(family or "", frozenset())
 
     if include_details:
         for key in added_keys:
@@ -844,11 +922,16 @@ def _compare_snapshots(
     for key in shared_keys:
         row_changed = False
         for column in common:
-            if column in skip_columns:
+            if column in skip_columns or column in excluded_columns:
                 continue
             before_value = str(before_map[key].get(column, "") or "").strip()
             after_value = str(after_map[key].get(column, "") or "").strip()
-            if before_value != after_value:
+            if not _column_values_equal(
+                before_value,
+                after_value,
+                column=column,
+                family=family,
+            ):
                 row_changed = True
                 if include_details:
                     detail = {
