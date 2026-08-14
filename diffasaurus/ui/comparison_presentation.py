@@ -11,12 +11,14 @@ from PyQt6.QtWidgets import (
 )
 
 from diffasaurus.core.report_history import (
+    delegate_collection_delta_summary,
     detail_identity,
     is_android_devices_family,
     is_autopilot_devices_family,
     is_ios_devices_family,
     is_managed_devices_family,
     is_role_assignments_family,
+    is_shared_mailboxes_family,
 )
 
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
@@ -238,6 +240,32 @@ MANAGED_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "PhoneNumber": "Phone number",
 }
 
+SHARED_MAILBOX_PROPERTY_LABELS: dict[str, str] = {
+    "DisplayName": "Display name",
+    "PrimarySmtpAddress": "Primary SMTP address",
+    "Alias": "Alias",
+    "ExternalDirectoryObjectId": "Entra object ID",
+    "RecipientTypeDetails": "Recipient type",
+    "HiddenFromAddressListsEnabled": "Hidden from address lists",
+    "WhenCreated": "Created",
+    "HasFullAccessDelegates": "Has Full Access delegates",
+    "FullAccessDelegates": "Full Access delegates",
+    "FullAccessDelegatesCount": "Full Access delegate count",
+    "HasSendAsDelegates": "Has Send As delegates",
+    "SendAsDelegates": "Send As delegates",
+    "SendAsDelegatesCount": "Send As delegate count",
+    "HasSendOnBehalfDelegates": "Has Send on behalf delegates",
+    "SendOnBehalfDelegates": "Send on behalf delegates",
+    "SendOnBehalfDelegatesCount": "Send on behalf delegate count",
+    "HasAnyDelegation": "Has any delegation",
+    "ForwardingAddress": "Forwarding address",
+    "ForwardingSmtpAddress": "Forwarding SMTP address",
+    "DeliverToMailboxAndForward": "Deliver to mailbox and forward",
+    "HasForwarding": "Has forwarding",
+    "LitigationHoldEnabled": "Litigation hold enabled",
+    "RetentionPolicy": "Retention policy",
+}
+
 AUTOPILOT_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "DisplayName": "Display name",
     "SerialNumber": "Serial number",
@@ -320,6 +348,8 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return IOS_DEVICE_PROPERTY_LABELS
     if is_managed_devices_family(family):
         return MANAGED_DEVICE_PROPERTY_LABELS
+    if is_shared_mailboxes_family(family):
+        return SHARED_MAILBOX_PROPERTY_LABELS
     if is_autopilot_devices_family(family):
         return AUTOPILOT_DEVICE_PROPERTY_LABELS
     if is_role_assignments_family(family):
@@ -339,10 +369,14 @@ def _is_device_identity_family(family: str | None) -> bool:
 def _is_semantic_detail_family(family: str | None) -> bool:
     return family in USER_ORIENTED_FAMILIES or _is_device_identity_family(
         family
-    ) or is_role_assignments_family(family)
+    ) or is_shared_mailboxes_family(family) or is_role_assignments_family(family)
 
 
 def property_display_text(column: str, family: str | None, *, change: str = "") -> str:
+    if is_shared_mailboxes_family(family):
+        if not column and change in {"Added", "Removed"}:
+            return "Shared mailbox"
+        return SHARED_MAILBOX_PROPERTY_LABELS.get(column, column)
     if is_role_assignments_family(family):
         if not column and change in {"Added", "Removed"}:
             return "Role assignment"
@@ -400,6 +434,19 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
         upn = detail.get("UserPrincipalName")
         if upn:
             parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
+    if is_shared_mailboxes_family(family):
+        parts = [identity]
+        if detail.get("display_name"):
+            parts.append(f"DisplayName: {detail['display_name']}")
+        if detail.get("primary_smtp"):
+            parts.append(f"PrimarySmtpAddress: {detail['primary_smtp']}")
+        if detail.get("alias"):
+            parts.append(f"Alias: {detail['alias']}")
+        if detail.get("external_directory_object_id"):
+            parts.append(
+                f"ExternalDirectoryObjectId: {detail['external_directory_object_id']}"
+            )
         return "\n".join(parts)
     if is_managed_devices_family(family):
         parts = [identity]
@@ -574,6 +621,20 @@ def populate_comparison_detail_table(
                 tip = property_tooltip(detail["column"], family)
                 if tip:
                     item.setToolTip(tip)
+            if column in {3, 4} and is_shared_mailboxes_family(family):
+                delegate_columns = {
+                    "FullAccessDelegates",
+                    "SendAsDelegates",
+                    "SendOnBehalfDelegates",
+                }
+                if detail.get("column") in delegate_columns:
+                    delta = delegate_collection_delta_summary(
+                        detail.get("before", ""),
+                        detail.get("after", ""),
+                    )
+                    if delta:
+                        existing = item.toolTip()
+                        item.setToolTip(f"{existing}\n\n{delta}" if existing else delta)
             if column == 0:
                 item.setForeground(
                     QColor(CHANGE_COLORS.get(value, default_text_color))

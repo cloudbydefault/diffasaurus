@@ -56,6 +56,7 @@ FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_ManagedDevices_Compliance": ("ManagedDeviceId", "AzureADDeviceId", "SerialNumber"),
     "Intune_Devices_Autopilot": ("AutopilotObjectId", "SerialNumber"),
+    "Exchange_SharedMailboxes": ("ExternalDirectoryObjectId", "PrimarySmtpAddress"),
 }
 
 FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
@@ -84,6 +85,11 @@ FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
         "SerialNumber",
         "ManagedDeviceId",
         "AzureADDeviceId",
+    ),
+    "Exchange_SharedMailboxes": (
+        "DisplayName",
+        "PrimarySmtpAddress",
+        "ExternalDirectoryObjectId",
     ),
 }
 
@@ -127,6 +133,7 @@ IOS_DEVICES_FAMILY = "Intune_iOS_Devices"
 IOS_DEVICES_REPORT_FAMILY = "Intune_iOS_Devices_Report"
 AUTOPILOT_DEVICES_FAMILY = "Intune_Devices_Autopilot"
 MANAGED_DEVICES_FAMILY = "Intune_ManagedDevices_Compliance"
+SHARED_MAILBOXES_FAMILY = "Exchange_SharedMailboxes"
 ROLE_ASSIGNMENTS_FAMILY = "Entra_Role_Assignments"
 ROLE_ASSIGNMENT_STABLE_KEY_COLUMNS = ("AssignmentScheduleId", "UserId")
 ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS = (
@@ -184,6 +191,34 @@ MANAGED_DEVICES_USER_PRESENTATION_COLUMNS = frozenset(
     }
 )
 
+SHARED_MAILBOXES_EXCLUDED_COLUMNS = frozenset(
+    {
+        "HasFullAccessDelegates",
+        "FullAccessDelegatesCount",
+        "HasSendAsDelegates",
+        "SendAsDelegatesCount",
+        "HasSendOnBehalfDelegates",
+        "SendOnBehalfDelegatesCount",
+        "HasAnyDelegation",
+        "HasForwarding",
+    }
+)
+
+SHARED_MAILBOX_DELEGATE_COLLECTION_COLUMNS = frozenset(
+    {
+        "FullAccessDelegates",
+        "SendAsDelegates",
+        "SendOnBehalfDelegates",
+    }
+)
+
+SHARED_MAILBOX_DELEGATE_ERROR_COVERAGE_COLUMNS = frozenset(
+    {
+        "FullAccessDelegates",
+        "SendAsDelegates",
+    }
+)
+
 ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS = frozenset(
     {
         "DisplayName",
@@ -204,6 +239,7 @@ FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     IOS_DEVICES_FAMILY: IOS_DEVICES_EXCLUDED_COLUMNS,
     AUTOPILOT_DEVICES_FAMILY: AUTOPILOT_DEVICES_EXCLUDED_COLUMNS,
     MANAGED_DEVICES_FAMILY: MANAGED_DEVICES_EXCLUDED_COLUMNS,
+    SHARED_MAILBOXES_FAMILY: SHARED_MAILBOXES_EXCLUDED_COLUMNS,
     ROLE_ASSIGNMENTS_FAMILY: ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS,
 }
 
@@ -257,6 +293,10 @@ def is_autopilot_devices_family(family: str | None) -> bool:
 
 def is_managed_devices_family(family: str | None) -> bool:
     return canonical_comparison_family(family) == MANAGED_DEVICES_FAMILY
+
+
+def is_shared_mailboxes_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == SHARED_MAILBOXES_FAMILY
 
 
 def is_role_assignments_family(family: str | None) -> bool:
@@ -731,6 +771,12 @@ def _comparison_row_key(
             if value:
                 return value
         return ""
+    if is_shared_mailboxes_family(family):
+        for column in ("ExternalDirectoryObjectId", "PrimarySmtpAddress"):
+            value = str(row.get(column, "") or "").strip()
+            if value:
+                return value
+        return ""
     if is_role_assignments_family(family):
         parts = [str(row.get(column, "") or "").strip() for column in key_columns]
         if key_columns == ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS:
@@ -780,6 +826,8 @@ def comparison_summary_unit(family: str | None) -> str:
         return "users"
     if family in _DEVICE_COMPARISON_FAMILIES or is_inventory_device_family(family):
         return "devices"
+    if is_shared_mailboxes_family(family):
+        return "shared mailboxes"
     return "rows"
 
 
@@ -807,12 +855,52 @@ def _sponsors_coverage_known(row: dict[str, str]) -> bool:
     return status is not None and 200 <= status < 300
 
 
+def _is_delegate_retrieval_error(value: str) -> bool:
+    return str(value or "").strip().upper().startswith("ERROR:")
+
+
+def _parse_delegate_collection_tokens(value: str) -> frozenset[str]:
+    if not value or not value.strip():
+        return frozenset()
+    if _is_delegate_retrieval_error(value):
+        return frozenset()
+    return frozenset(
+        token.strip().casefold()
+        for token in _COLLECTION_VALUE_SPLIT_RE.split(value.strip())
+        if token.strip()
+    )
+
+
+def delegate_collection_delta_summary(before_value: str, after_value: str) -> str:
+    before_tokens = _parse_delegate_collection_tokens(before_value)
+    after_tokens = _parse_delegate_collection_tokens(after_value)
+    added = sorted(token for token in after_tokens - before_tokens)
+    removed = sorted(token for token in before_tokens - after_tokens)
+    if not added and not removed:
+        return ""
+    parts: list[str] = []
+    if removed:
+        parts.append("Removed delegates:\n" + "\n".join(removed))
+    if added:
+        parts.append("Added delegates:\n" + "\n".join(added))
+    return "\n\n".join(parts)
+
+
 def _should_skip_column_comparison(
     column: str,
     family: str | None,
     before_row: dict[str, str],
     after_row: dict[str, str],
 ) -> bool:
+    if is_shared_mailboxes_family(family):
+        if column in SHARED_MAILBOX_DELEGATE_ERROR_COVERAGE_COLUMNS:
+            before_value = str(before_row.get(column, "") or "").strip()
+            after_value = str(after_row.get(column, "") or "").strip()
+            if _is_delegate_retrieval_error(before_value) or _is_delegate_retrieval_error(
+                after_value
+            ):
+                return True
+        return False
     if is_managed_devices_family(family):
         if column in MANAGED_DEVICES_USER_PRESENTATION_COLUMNS:
             before_user_id = str(before_row.get("UserId", "") or "").strip()
@@ -854,6 +942,10 @@ def _column_values_equal(
         return _parse_collection_tokens(before_value) == _parse_collection_tokens(after_value)
     if family == USER_PROPERTIES_FAMILY and column in USER_PROPERTIES_COLLECTION_COLUMNS:
         return _parse_collection_tokens(before_value) == _parse_collection_tokens(after_value)
+    if is_shared_mailboxes_family(family) and column in SHARED_MAILBOX_DELEGATE_COLLECTION_COLUMNS:
+        return _parse_delegate_collection_tokens(before_value) == _parse_delegate_collection_tokens(
+            after_value
+        )
     return before_value == after_value
 
 
@@ -1038,6 +1130,36 @@ def _managed_device_identity_label(
     managed_device_id = _pick_identity_label(primary_row, fallback_row, ("ManagedDeviceId",))
     if managed_device_id:
         return managed_device_id
+    return key
+
+
+def _shared_mailbox_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+    primary_smtp = _pick_identity_label(primary_row, fallback_row, ("PrimarySmtpAddress",))
+    if display_name and primary_smtp:
+        return f"{display_name} · {primary_smtp}"
+    if primary_smtp:
+        return primary_smtp
+    if display_name:
+        return display_name
+    external_id = _pick_identity_label(
+        primary_row,
+        fallback_row,
+        ("ExternalDirectoryObjectId",),
+    )
+    if external_id:
+        return external_id
     return key
 
 
@@ -1355,6 +1477,38 @@ def _attach_detail_identity(
         if user_id:
             detail["user_id"] = user_id
         return
+    if is_shared_mailboxes_family(family):
+        detail["identity"] = _shared_mailbox_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+        if display_name:
+            detail["display_name"] = display_name
+        primary_smtp = _pick_identity_label(primary_row, fallback_row, ("PrimarySmtpAddress",))
+        if primary_smtp:
+            detail["primary_smtp"] = primary_smtp
+        alias = _pick_identity_label(primary_row, fallback_row, ("Alias",))
+        if alias:
+            detail["alias"] = alias
+        external_id = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("ExternalDirectoryObjectId",),
+        )
+        if external_id:
+            detail["external_directory_object_id"] = external_id
+        return
     if is_autopilot_devices_family(family):
         detail["identity"] = _autopilot_device_identity_label(
             key,
@@ -1554,15 +1708,20 @@ def _compare_snapshots(
         skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber", "UDID"))
     if is_managed_devices_family(family):
         skip_columns.update(("ManagedDeviceId", "AzureADDeviceId", "SerialNumber"))
+    if is_shared_mailboxes_family(family):
+        skip_columns.update(("ExternalDirectoryObjectId",))
     if is_autopilot_devices_family(family):
         skip_columns.update(("AutopilotObjectId", "SerialNumber"))
     excluded_columns = _comparison_excluded_columns(family)
-    added_after = (
-        "New assignment" if is_role_assignments_family(family) else "New row"
-    )
-    removed_before = (
-        "Existing assignment" if is_role_assignments_family(family) else "Existing row"
-    )
+    if is_shared_mailboxes_family(family):
+        added_after = "New mailbox"
+        removed_before = "Existing mailbox"
+    elif is_role_assignments_family(family):
+        added_after = "New assignment"
+        removed_before = "Existing assignment"
+    else:
+        added_after = "New row"
+        removed_before = "Existing row"
 
     if include_details:
         for key in added_keys:
