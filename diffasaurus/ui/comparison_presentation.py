@@ -53,6 +53,10 @@ def identity_tooltip(detail: dict[str, str]) -> str:
         parts.append(f"UserId: {detail['user_id']}")
     if detail.get("group_id"):
         parts.append(f"GroupId: {detail['group_id']}")
+    if detail.get("access_package_id"):
+        parts.append(f"AccessPackageId: {detail['access_package_id']}")
+    if detail.get("policy_id"):
+        parts.append(f"PolicyId: {detail['policy_id']}")
     if identity != detail.get("key", ""):
         parts.append(f"Key: {detail['key']}")
     return "\n".join(parts)
