@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QDialog
 
@@ -20,6 +20,7 @@ from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.main_window import DiffasaurusWindow
 from diffasaurus.ui.multi_column_filter import collect_distinct_values
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer, load_snapshot_payload, LARGE_SNAPSHOT_ROW_THRESHOLD
+from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
 
 
 def _drain_qt(*, thread_pools: list | None = None, events: int = 20) -> None:
@@ -832,6 +833,206 @@ class SnapshotExplorerTests(unittest.TestCase):
             )
         finally:
             _close_explorer(explorer)
+
+    def test_export_selection_button_starts_disabled(self):
+        explorer = SnapshotExplorer()
+        try:
+            self.assertFalse(explorer.export_selection_button.isEnabled())
+        finally:
+            _close_explorer(explorer)
+
+    def test_export_selection_button_disabled_without_selection(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.model.set_table(
+                ["Name", "State"],
+                [["Alice", "Enabled"], ["Bob", "Disabled"]],
+            )
+            self.assertTrue(explorer.export_view_button.isEnabled())
+            self.assertFalse(explorer.export_selection_button.isEnabled())
+        finally:
+            _close_explorer(explorer)
+
+    def test_export_selection_button_state_follows_table_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "members.csv"
+            _write_csv(path, "Name,State\nAlice,Enabled\nBob,Disabled\n")
+            explorer = SnapshotExplorer()
+            try:
+                explorer.set_snapshots([_make_snapshot(path)])
+                explorer.activate()
+                _wait_for_snapshot_load(explorer)
+                self.assertTrue(explorer.export_view_button.isEnabled())
+                self.assertFalse(explorer.export_selection_button.isEnabled())
+
+                selection = explorer.table.selectionModel()
+                assert selection is not None
+                selection.select(
+                    explorer.proxy.index(0, 0),
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                self.assertTrue(explorer.export_selection_button.isEnabled())
+
+                selection.select(
+                    explorer.proxy.index(1, 0),
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                self.assertTrue(explorer.export_selection_button.isEnabled())
+
+                selection.clearSelection()
+                self.assertFalse(explorer.export_selection_button.isEnabled())
+
+                selection.select(
+                    explorer.proxy.index(0, 0),
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                self.assertTrue(explorer.export_selection_button.isEnabled())
+
+                explorer.proxy.set_column_allowed_values(0, {"Bob"})
+                self.assertFalse(explorer.export_selection_button.isEnabled())
+
+                explorer.clear_filters()
+                self.assertFalse(explorer.export_selection_button.isEnabled())
+            finally:
+                _close_explorer(explorer)
+
+    def test_export_selection_button_disabled_after_model_reset_with_stale_selection(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer._family = "Test"
+            explorer.model.set_table(["Name"], [["Alice"]])
+            selection = explorer.table.selectionModel()
+            assert selection is not None
+            selection.select(
+                explorer.proxy.index(0, 0),
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+            self.assertTrue(explorer.export_selection_button.isEnabled())
+
+            explorer.proxy.begin_bulk_update()
+            explorer.model.set_table(["Name"], [["Bob"], ["Carol"]])
+            explorer.proxy.end_bulk_update()
+            self.assertFalse(explorer.export_selection_button.isEnabled())
+        finally:
+            _close_explorer(explorer)
+
+    def test_export_view_writes_visible_rows_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export_path = Path(directory) / "filtered.csv"
+            explorer = SnapshotExplorer()
+            try:
+                explorer.loaded_path = Path(directory) / "memberships.csv"
+                explorer.model.set_table(
+                    ["Name", "State"],
+                    [["Alice", "Enabled"], ["Bob", "Disabled"]],
+                    ";",
+                )
+                explorer.proxy.set_column_allowed_values(1, {"Disabled"})
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.QFileDialog.getSaveFileName",
+                    return_value=(str(export_path), "CSV files (*.csv)"),
+                ):
+                    explorer.export_view()
+                with export_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    rows = list(__import__("csv").reader(handle, delimiter=";"))
+                self.assertEqual(rows, [["Name", "State"], ["Bob", "Disabled"]])
+                self.assertIn("Exported 1 visible rows", explorer.status.text())
+            finally:
+                _close_explorer(explorer)
+
+    def test_export_selection_writes_selected_rows_in_display_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export_path = Path(directory) / "selection.csv"
+            explorer = SnapshotExplorer()
+            try:
+                explorer.loaded_path = Path(directory) / "memberships.csv"
+                explorer.model.set_table(
+                    ["Name"],
+                    [["Charlie"], ["Alice"], ["Bob"]],
+                )
+                explorer.table.setSortingEnabled(True)
+                explorer.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+                selection = explorer.table.selectionModel()
+                assert selection is not None
+                selection.select(
+                    explorer.proxy.index(2, 0),
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                selection.select(
+                    explorer.proxy.index(0, 0),
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                self.assertTrue(explorer.export_selection_button.isEnabled())
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.QFileDialog.getSaveFileName",
+                    return_value=(str(export_path), "CSV files (*.csv)"),
+                ):
+                    explorer.export_selection()
+                with export_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    rows = list(__import__("csv").reader(handle))
+                self.assertEqual(rows, [["Name"], ["Alice"], ["Charlie"]])
+            finally:
+                _close_explorer(explorer)
+
+    def test_export_view_cancel_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export_path = Path(directory) / "filtered.csv"
+            explorer = SnapshotExplorer()
+            try:
+                explorer.model.set_table(["Name"], [["Alice"]])
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.QFileDialog.getSaveFileName",
+                    return_value=("", "CSV files (*.csv)"),
+                ):
+                    explorer.export_view()
+                self.assertFalse(export_path.exists())
+            finally:
+                _close_explorer(explorer)
+
+    def test_export_controls_hidden_for_configuration_policy_family(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.model.set_table(["Name"], [["Policy"]])
+            explorer.set_family(CONFIGURATION_POLICY_FAMILY)
+            self.assertFalse(explorer.export_view_button.isVisible())
+            self.assertFalse(explorer.export_selection_button.isVisible())
+            self.assertFalse(explorer.export_view_button.isEnabled())
+            self.assertFalse(explorer.export_selection_button.isEnabled())
+        finally:
+            _close_explorer(explorer)
+
+    def test_new_snapshot_load_clears_selection_export_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path_a = Path(directory) / "a.csv"
+            path_b = Path(directory) / "b.csv"
+            _write_csv(path_a, "Name\nAlice\n")
+            _write_csv(path_b, "Name\nBob\n")
+            explorer = SnapshotExplorer()
+            try:
+                explorer.set_snapshots([_make_snapshot(path_a)])
+                explorer.activate()
+                _wait_for_snapshot_load(explorer)
+                selection = explorer.table.selectionModel()
+                assert selection is not None
+                selection.select(
+                    explorer.proxy.index(0, 0),
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                self.assertTrue(explorer.export_selection_button.isEnabled())
+
+                explorer.set_snapshots([_make_snapshot(path_b)])
+                explorer.activate()
+                _wait_for_snapshot_load(explorer)
+                self.assertFalse(explorer.export_selection_button.isEnabled())
+            finally:
+                _close_explorer(explorer)
 
 
 if __name__ == "__main__":

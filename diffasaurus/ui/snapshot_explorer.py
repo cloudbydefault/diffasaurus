@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PyQt6.QtCore import QThreadPool, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QItemSelectionModel, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -36,6 +37,12 @@ from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.dashboard_view import DashboardView
 from diffasaurus.ui.configuration_policy_presentation import count_semantic_settings
 from diffasaurus.ui.multi_column_filter import MultiColumnFilterDialog
+from diffasaurus.ui.snapshot_export import (
+    default_export_filename,
+    selected_source_rows,
+    visible_source_rows,
+    write_csv_export,
+)
 
 LARGE_SNAPSHOT_ROW_THRESHOLD = 20_000
 
@@ -161,6 +168,9 @@ class SnapshotExplorer(QWidget):
         self.filter_button = QPushButton("◇  Multi-column filter")
         self.clear_button = QPushButton("Clear filters")
         self.clear_button.setEnabled(False)
+        self.export_view_button = QPushButton("Export view")
+        self.export_selection_button = QPushButton("Export selection")
+        self.export_selection_button.setEnabled(False)
         self.search_mode = QComboBox()
         self.search_mode.addItem("Smart search", "smart")
         self.search_mode.addItem("All columns", "all")
@@ -169,6 +179,8 @@ class SnapshotExplorer(QWidget):
         self.search.setMinimumWidth(260)
         tools.addWidget(self.filter_button)
         tools.addWidget(self.clear_button)
+        tools.addWidget(self.export_view_button)
+        tools.addWidget(self.export_selection_button)
         tools.addStretch()
         tools.addWidget(self.search_mode)
         tools.addWidget(self.search, 1)
@@ -228,6 +240,11 @@ class SnapshotExplorer(QWidget):
         self.dashboard_button.clicked.connect(lambda: self.show_view(1))
         self.filter_button.clicked.connect(self.open_filter)
         self.clear_button.clicked.connect(self.clear_filters)
+        self.export_view_button.clicked.connect(self.export_view)
+        self.export_selection_button.clicked.connect(self.export_selection)
+        self._bound_selection_model: QItemSelectionModel | None = None
+        self.proxy.modelReset.connect(self._on_proxy_model_reset)
+        self._bind_selection_model()
         self.dashboard.apply_filter_requested.connect(self.apply_dashboard_filter)
         self.open_policy_button = QPushButton("Open in Configuration policies")
         self.open_policy_button.setObjectName("primaryButton")
@@ -245,6 +262,8 @@ class SnapshotExplorer(QWidget):
         self.filter_button.setVisible(not policy_mode)
         self.search_mode.setVisible(not policy_mode)
         self.search.setVisible(not policy_mode)
+        self.export_view_button.setVisible(not policy_mode)
+        self.export_selection_button.setVisible(not policy_mode)
         self.open_policy_button.setVisible(policy_mode)
         if policy_mode:
             self.table_button.setText("▦  Policy snapshot")
@@ -252,6 +271,109 @@ class SnapshotExplorer(QWidget):
             self.show_view(0)
         else:
             self.table_button.setText("▦  Table")
+        self._update_export_buttons()
+
+    def _export_enabled(self) -> bool:
+        return (
+            not is_configuration_policy_family(self._family)
+            and self.model.rowCount() > 0
+        )
+
+    def _bind_selection_model(self) -> None:
+        selection = self.table.selectionModel()
+        if selection is self._bound_selection_model:
+            return
+        if self._bound_selection_model is not None:
+            try:
+                self._bound_selection_model.selectionChanged.disconnect(
+                    self._update_export_selection_state
+                )
+            except TypeError:
+                pass
+        self._bound_selection_model = selection
+        if selection is not None:
+            selection.selectionChanged.connect(self._update_export_selection_state)
+
+    def _on_proxy_model_reset(self) -> None:
+        self._bind_selection_model()
+        self._update_export_selection_state()
+
+    def _update_export_selection_state(self) -> None:
+        selection = self.table.selectionModel()
+        has_selection = bool(selection and selection.selectedRows())
+        self.export_selection_button.setEnabled(
+            self._export_enabled() and has_selection
+        )
+
+    def _update_export_buttons(self) -> None:
+        self.export_view_button.setEnabled(self._export_enabled())
+        self._update_export_selection_state()
+
+    def export_view(self) -> None:
+        if not self._export_enabled():
+            return
+        rows = visible_source_rows(self.proxy, self.model)
+        if not rows:
+            return
+        default_name = default_export_filename(
+            self.loaded_path,
+            suffix="filtered",
+            fallback="snapshot_filtered.csv",
+        )
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "Export visible rows",
+            default_name,
+            "CSV files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            write_csv_export(
+                Path(path),
+                self.model.headers,
+                rows,
+                delimiter=self.model.delimiter,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Snapshot explorer", f"Export failed: {exc}")
+            return
+        self.status.setText(
+            f"Exported {len(rows):,} visible rows to {Path(path).name}"
+        )
+
+    def export_selection(self) -> None:
+        if not self._export_enabled():
+            return
+        rows = selected_source_rows(self.table, self.proxy, self.model)
+        if not rows:
+            return
+        default_name = default_export_filename(
+            self.loaded_path,
+            suffix="selection",
+            fallback="snapshot_selection.csv",
+        )
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "Export selected rows",
+            default_name,
+            "CSV files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            write_csv_export(
+                Path(path),
+                self.model.headers,
+                rows,
+                delimiter=self.model.delimiter,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Snapshot explorer", f"Export failed: {exc}")
+            return
+        self.status.setText(
+            f"Exported {len(rows):,} selected row{'s' if len(rows) != 1 else ''} to {Path(path).name}"
+        )
 
     def set_snapshots(self, snapshots: list[ReportSnapshot]):
         selected_path = self.snapshot_combo.currentData()
@@ -278,6 +400,7 @@ class SnapshotExplorer(QWidget):
             self.status.setText("No snapshots available for this family")
             self.loaded_path = None
             self._last_snapshot_was_large = False
+        self._update_export_buttons()
 
     def activate(self):
         snapshot = self.snapshot_combo.currentData()
@@ -376,6 +499,7 @@ class SnapshotExplorer(QWidget):
         self.status.setText(
             f"{len(rows):,} rows · {len(headers):,} columns · {snapshot.path.name}"
         )
+        self._update_export_buttons()
 
     def _policy_snapshot_loaded(self, generation: int, snapshot: ReportSnapshot, payload):
         if generation != self._generation:
@@ -393,6 +517,7 @@ class SnapshotExplorer(QWidget):
             f"Policy bundle · {len(policy_rows)} policies · {snapshot.path.name}"
         )
         self.dashboard.build_dashboard("Policy snapshot", stats or [])
+        self._update_export_buttons()
 
     def _emit_open_configuration_policies(self):
         policy_key = None
@@ -472,6 +597,7 @@ class SnapshotExplorer(QWidget):
         self.proxy.set_search_text("")
         self.table.clearSelection()
         self._update_status()
+        self._update_export_buttons()
 
     def _reset_filters_after_load(self):
         self._filters = {}
@@ -604,3 +730,4 @@ class SnapshotExplorer(QWidget):
             f"{visible:,} of {total:,} rows visible · "
             f"{self.model.columnCount():,} columns · {name}"
         )
+        self._update_export_selection_state()
