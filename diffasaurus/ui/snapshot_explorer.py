@@ -35,6 +35,7 @@ from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.dashboard_view import DashboardView
 from diffasaurus.ui.configuration_policy_presentation import count_semantic_settings
+from diffasaurus.ui.multi_column_filter import MultiColumnFilterDialog
 
 LARGE_SNAPSHOT_ROW_THRESHOLD = 20_000
 
