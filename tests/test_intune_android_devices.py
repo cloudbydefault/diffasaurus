@@ -267,10 +267,13 @@ class AndroidReportHistoryTests(unittest.TestCase):
             self.assertEqual(result.changed, 1)
             changed = next(detail for detail in result.details if detail["change"] == "Changed")
             self.assertEqual(changed.get("column"), "DeviceName")
-            self.assertEqual(changed.get("identity"), "New Pixel Name")
+            self.assertEqual(changed.get("identity"), "New Pixel Name · SN-ANDROID-1")
 
-    def test_comparison_summary_unit_uses_devices(self):
+    def test_report_family_parses_report_suffix(self):
+        path = Path("Intune_Android_Devices_Report_20260812-170000.csv")
+        self.assertEqual(report_family(path), "Intune_Android_Devices_Report")
         self.assertEqual(comparison_summary_unit("Intune_Android_Devices"), "devices")
+        self.assertEqual(comparison_summary_unit("Intune_Android_Devices_Report"), "devices")
 
 
 class AndroidDashboardTests(unittest.TestCase):
