@@ -247,6 +247,7 @@ class FamilyChangeSection(QFrame):
             elif item.family in {
                 "Intune_Android_Devices",
                 "Intune_Android_Devices_Report",
+                "Intune_Devices_Autopilot",
             }:
                 added = item.summary.added
                 removed = item.summary.removed
@@ -386,6 +387,7 @@ class FamilyChangeSection(QFrame):
                     "Entra_Users_Properties",
                     "Intune_Android_Devices",
                     "Intune_Android_Devices_Report",
+                    "Intune_Devices_Autopilot",
                 }:
                     matching.append(detail)
                 else:
