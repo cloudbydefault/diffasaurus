@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal
+from PyQt6.QtCore import Qt, QStringListModel, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QCompleter,
@@ -24,6 +24,8 @@ ENTITY_TYPE_LABELS: dict[EntityType, str] = {
 
 ENTITY_TYPE_ORDER: tuple[EntityType, ...] = ("user", "device", "shared_mailbox")
 
+AUTOCOMPLETE_DEBOUNCE_MS = 120
+
 
 class EntitySelectorPanel(QWidget):
     entity_selected = pyqtSignal(object)
@@ -35,6 +37,9 @@ class EntitySelectorPanel(QWidget):
         self._resolver: EntityResolver | None = None
         self._repository: EntityIndexRepository | None = None
         self._selected: EntityRecord | None = None
+        self._autocomplete_timer = QTimer(self)
+        self._autocomplete_timer.setSingleShot(True)
+        self._autocomplete_timer.timeout.connect(self._update_completer)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -131,6 +136,7 @@ class EntitySelectorPanel(QWidget):
 
     def clear_index_state(self) -> None:
         self._selected = None
+        self._autocomplete_timer.stop()
         self._completer_model.setStringList([])
         self.disambiguation.hide()
         self.status_label.hide()
@@ -178,18 +184,29 @@ class EntitySelectorPanel(QWidget):
     def _entity_type_changed(self) -> None:
         self._selected = None
         self.disambiguation.hide()
-        self._update_completer()
+        self._autocomplete_timer.stop()
+        self._completer_model.setStringList([])
         self.status_label.hide()
         self.search_input.clear()
         self.selection_cleared.emit()
         self.entity_type_changed.emit()
 
     def _on_search_text_changed(self, text: str) -> None:
-        self._update_completer()
+        self._autocomplete_timer.stop()
+        if not text.strip():
+            self._completer_model.setStringList([])
+        else:
+            self._autocomplete_timer.start(AUTOCOMPLETE_DEBOUNCE_MS)
         if self._selected is not None or self.disambiguation.isVisible():
             self._selected = None
             self.disambiguation.hide()
             self.selection_cleared.emit()
+
+    def _flush_autocomplete_debounce(self) -> None:
+        """Apply any pending autocomplete update immediately (tests only)."""
+        if self._autocomplete_timer.isActive():
+            self._autocomplete_timer.stop()
+            self._update_completer()
 
     def _update_completer(self) -> None:
         prefix = self.search_input.text().strip()
