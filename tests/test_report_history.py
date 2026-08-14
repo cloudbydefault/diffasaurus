@@ -995,6 +995,50 @@ def access_package_row(
     return row
 
 
+def user_activity_row(
+    user_id: str,
+    *,
+    display_name: str = "",
+    upn: str = "",
+    mail: str = "",
+    user_type: str = "Member",
+    account_enabled: str = "True",
+    job_title: str = "",
+    company_name: str = "",
+    department: str = "",
+    country: str = "",
+    city: str = "",
+    created: str = "2025-01-01T00:00:00Z",
+    last_password_change: str = "",
+    on_premises_sync: str = "False",
+    last_interactive: str = "",
+    last_non_interactive: str = "",
+    last_successful: str = "",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "DisplayName": display_name,
+        "UPN": upn,
+        "Mail": mail,
+        "UserId": user_id,
+        "UserType": user_type,
+        "AccountEnabled": account_enabled,
+        "JobTitle": job_title,
+        "CompanyName": company_name,
+        "Department": department,
+        "Country": country,
+        "City": city,
+        "CreatedDateTime": created,
+        "LastPasswordChangeDateTime": last_password_change,
+        "OnPremisesSyncEnabled": on_premises_sync,
+        "LastInteractiveSignInDateTime": last_interactive,
+        "LastNonInteractiveSignInDateTime": last_non_interactive,
+        "LastSuccessfulSignInDateTime": last_successful,
+    }
+    row.update(extra)
+    return row
+
+
 class EntraAccessPackageComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Access_Packages"
 
@@ -1205,6 +1249,334 @@ class EntraAccessPackageComparisonTests(unittest.TestCase):
             result = compare_snapshots(snapshots[0], snapshots[1], "UPN")
             self.assertEqual(result.changed, 1)
 
+
+class EntraUserActivityComparisonTests(unittest.TestCase):
+    FAMILY = "Entra_Users_Activity"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = user_activity_row("template-user", upn="template@example.com")
+        for path, rows in (
+            (root / "Entra_Users_Activity_20260731-042100.csv", baseline_rows),
+            (root / "Entra_Users_Activity_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_user_id_is_preferred_over_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [user_activity_row("user-1", display_name="Ada", upn="ada@example.com")],
+                [user_activity_row("user-1", display_name="Ada", upn="ada@example.com")],
+            )
+            self.assertEqual(suggested_key(baseline.headers, self.FAMILY), "UserId")
+
+    def test_upn_rename_stays_same_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_activity_row(
+                        "user-1",
+                        display_name="Ada Lovelace",
+                        upn="ada.old@example.com",
+                    ),
+                ],
+                [
+                    user_activity_row(
+                        "user-1",
+                        display_name="Ada Lovelace",
+                        upn="ada.new@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "UPN")
+            self.assertEqual(changed["before"], "ada.old@example.com")
+            self.assertEqual(changed["after"], "ada.new@example.com")
+
+    def test_distinct_user_ids_remain_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    user_activity_row("user-1", display_name="Ada Lovelace", upn="ada@example.com"),
+                    user_activity_row("user-2", display_name="Ada Lovelace", upn="ada.clone@example.com"),
+                ],
+                [
+                    user_activity_row("user-1", display_name="Ada Lovelace", upn="ada@example.com"),
+                    user_activity_row("user-2", display_name="Ada Lovelace", upn="ada.clone@example.com"),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.stable, 2)
+
+    def test_row_reordering_does_not_create_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [
+                user_activity_row("user-1", display_name="Ada", upn="ada@example.com"),
+                user_activity_row("user-2", display_name="Grace", upn="grace@example.com"),
+            ]
+            baseline, latest = self._write_pair(Path(directory), rows, list(reversed(rows)))
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_display_name_change_remains_same_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [user_activity_row("user-1", display_name="Ada", upn="ada@example.com")],
+                [user_activity_row("user-1", display_name="Ada Lovelace", upn="ada@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "DisplayName")
+            self.assertEqual(detail_identity(changed), "Ada Lovelace · ada@example.com")
+
+    def test_account_enabled_change_remains_same_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [user_activity_row("user-1", display_name="Ada", upn="ada@example.com", account_enabled="True")],
+                [user_activity_row("user-1", display_name="Ada", upn="ada@example.com", account_enabled="False")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "AccountEnabled")
+            self.assertEqual(changed["before"], "True")
+            self.assertEqual(changed["after"], "False")
+
+    def test_added_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [],
+                [user_activity_row("user-1", display_name="Ada Lovelace", upn="ada@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            self.assertEqual(detail_identity(added), "Ada Lovelace · ada@example.com")
+            self.assertEqual(added["user_id"], "user-1")
+
+    def test_removed_user_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [user_activity_row("user-1", display_name="Grace Hopper", upn="grace@example.com")],
+                [],
+            )
+            result = self._compare(baseline, latest)
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(removed), "Grace Hopper · grace@example.com")
+
+    def test_legacy_snapshot_without_user_id_falls_back_to_upn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_headers = {
+                "DisplayName": "Ada",
+                "UPN": "ada@example.com",
+                "Mail": "",
+                "UserType": "Member",
+                "AccountEnabled": "True",
+                "LastSuccessfulSignInDateTime": "2026-08-12 12:57:40",
+            }
+            for stamp, upn in (
+                ("20260731-042100", "ada.old@example.com"),
+                ("20260804-042100", "ada.new@example.com"),
+            ):
+                row = dict(legacy_headers)
+                row["UPN"] = upn
+                write_report(root / f"Entra_Users_Activity_{stamp}.csv", [row])
+            snapshots = scan_report_history(root)[self.FAMILY]
+            self.assertEqual(suggested_key(snapshots[0].headers, self.FAMILY), "UPN")
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                "UPN",
+                self.FAMILY,
+            )
+            self.assertEqual((result.added, result.removed), (1, 1))
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class EntraUserActivityPresentationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_identity_formats(self):
+        from diffasaurus.ui.comparison_presentation import identity_display_text
+
+        detail = {
+            "change": "Changed",
+            "key": "user-1",
+            "identity": "Ada Lovelace · ada@example.com",
+            "column": "LastSuccessfulSignInDateTime",
+            "before": "2026-08-12 12:57:40",
+            "after": "2026-08-13 15:18:14",
+            "user_id": "user-1",
+            "UPN": "ada@example.com",
+        }
+        self.assertEqual(
+            identity_display_text(detail, "Entra_Users_Activity"),
+            "Ada Lovelace · ada@example.com",
+        )
+        self.assertEqual(
+            identity_display_text(
+                {"identity": "ada@example.com", "key": "ada@example.com"},
+                "Entra_Users_Activity",
+            ),
+            "ada@example.com",
+        )
+        self.assertEqual(
+            identity_display_text(
+                {"identity": "Ada Lovelace", "key": "user-1"},
+                "Entra_Users_Activity",
+            ),
+            "Ada Lovelace",
+        )
+        self.assertEqual(
+            identity_display_text(
+                {"identity": "user-1", "key": "user-1"},
+                "Entra_Users_Activity",
+            ),
+            "user-1",
+        )
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(
+            property_display_text("LastNonInteractiveSignInDateTime", "Entra_Users_Activity"),
+            "Last non-interactive sign-in",
+        )
+        self.assertEqual(
+            property_display_text("LastSuccessfulSignInDateTime", "Entra_Users_Activity"),
+            "Last successful sign-in",
+        )
+        self.assertEqual(
+            property_display_text("AccountEnabled", "Entra_Users_Activity"),
+            "Account enabled",
+        )
+        self.assertEqual(
+            property_display_text("", "Entra_Users_Activity", change="Added"),
+            "User",
+        )
+        self.assertEqual(
+            property_display_text("FutureField", "Entra_Users_Activity"),
+            "FutureField",
+        )
+        tooltip = property_tooltip("LastSuccessfulSignInDateTime", "Entra_Users_Activity")
+        self.assertIn("Last successful sign-in", tooltip)
+        self.assertIn("CSV field: LastSuccessfulSignInDateTime", tooltip)
+
+    def test_identity_tooltip_includes_user_id(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Ada Lovelace · ada@example.com",
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "UPN": "ada@example.com",
+            "key": "00000000-0000-0000-0000-000000000001",
+        }
+        tooltip = identity_tooltip(detail, "Entra_Users_Activity")
+        self.assertIn("Ada Lovelace · ada@example.com", tooltip)
+        self.assertIn("UserId: 00000000-0000-0000-0000-000000000001", tooltip)
+        self.assertIn("UPN: ada@example.com", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_property(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = "Entra_Users_Activity"
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": "user-1",
+                    "identity": "Ada Lovelace · ada@example.com",
+                    "column": "LastSuccessfulSignInDateTime",
+                    "before": "2026-08-12 12:57:40",
+                    "after": "2026-08-13 15:18:14",
+                    "user_id": "user-1",
+                    "UPN": "ada@example.com",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(
+            section.detail_table.item(0, 1).text(),
+            "Ada Lovelace · ada@example.com",
+        )
+        self.assertEqual(
+            section.detail_table.item(0, 2).text(),
+            "Last successful sign-in",
+        )
+
+    def test_recent_changes_summary_uses_user_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family="Entra_Users_Activity",
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="UserId",
+            summary=ComparisonSummary(added=1, removed=1, changed=1063, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 user added · 1 user removed · 1,063 users changed",
+        )
+
+    def test_comparison_summary_unit_uses_users(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit("Entra_Users_Activity"), "users")
 
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Group_User_Memberships"

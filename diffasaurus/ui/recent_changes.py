@@ -231,6 +231,15 @@ class FamilyChangeSection(QFrame):
                     f"{item.summary.removed} removed · "
                     f"{item.summary.changed} modified"
                 )
+            elif item.family == "Entra_Users_Activity":
+                added = item.summary.added
+                removed = item.summary.removed
+                changed = item.summary.changed
+                self.counts_label.setText(
+                    f"{added:,} user{'s' if added != 1 else ''} added · "
+                    f"{removed:,} user{'s' if removed != 1 else ''} removed · "
+                    f"{changed:,} user{'s' if changed != 1 else ''} changed"
+                )
             else:
                 self.counts_label.setText(
                     f"{item.summary.added} added · {item.summary.removed} removed · "
@@ -339,7 +348,7 @@ class FamilyChangeSection(QFrame):
             if self._semantic_details
             else (self._details.details if self._details else ())
         )
-        if source_details and source_details[0].get("event_type"):
+        if self._semantic_details and source_details and source_details[0].get("event_type"):
             from diffasaurus.ui.configuration_policy_presentation import (
                 semantic_event_details_to_display_rows,
             )
@@ -355,15 +364,18 @@ class FamilyChangeSection(QFrame):
                 has_more = True
                 break
             if "change" in detail and "Change" not in detail:
-                matching.append(
-                    {
-                        "Change": detail.get("change", ""),
-                        "Identity": detail.get("identity", ""),
-                        "Property": detail.get("column", detail.get("property", "")),
-                        "Before": detail.get("before", ""),
-                        "After": detail.get("after", ""),
-                    }
-                )
+                if self._family == "Entra_Users_Activity":
+                    matching.append(detail)
+                else:
+                    matching.append(
+                        {
+                            "Change": detail.get("change", ""),
+                            "Identity": detail.get("identity", ""),
+                            "Property": detail.get("column", detail.get("property", "")),
+                            "Before": detail.get("before", ""),
+                            "After": detail.get("after", ""),
+                        }
+                    )
             else:
                 matching.append(detail)
 

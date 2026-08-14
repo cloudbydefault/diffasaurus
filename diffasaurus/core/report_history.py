@@ -49,6 +49,7 @@ PREFERRED_KEYS = (
 )
 
 FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
+    "Entra_Users_Activity": ("UserId", "UPN"),
     "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
 }
@@ -533,6 +534,8 @@ def detail_identity(detail: dict[str, str]) -> str:
 def comparison_summary_unit(family: str | None) -> str:
     if family == "Entra_Group_User_Memberships":
         return "memberships"
+    if family == "Entra_Users_Activity":
+        return "users"
     if family in _DEVICE_COMPARISON_FAMILIES:
         return "devices"
     return "rows"
@@ -609,6 +612,29 @@ def _relationship_identity_label(
     return user or group or key
 
 
+def _user_activity_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+    upn = _pick_identity_label(primary_row, fallback_row, ("UPN",))
+    if display_name and upn:
+        return f"{display_name} · {upn}"
+    if upn:
+        return upn
+    if display_name:
+        return display_name
+    return key
+
+
 def _attach_detail_identity(
     detail: dict[str, str],
     key: str,
@@ -654,6 +680,30 @@ def _attach_detail_identity(
             value = _pick_identity_label(primary_row, fallback_row, (field,))
             if value:
                 detail[field] = value
+        return
+    if family == "Entra_Users_Activity":
+        detail["identity"] = _user_activity_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        user_id = _pick_identity_label(primary_row, fallback_row, ("UserId",))
+        if not user_id and key and "@" not in key:
+            user_id = key
+        if user_id:
+            detail["user_id"] = user_id
+        upn = _pick_identity_label(primary_row, fallback_row, ("UPN",))
+        if upn:
+            detail["UPN"] = upn
         return
     identity_columns = FAMILY_IDENTITY_DISPLAY.get(family or "", ())
     if identity_columns:
