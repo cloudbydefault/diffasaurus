@@ -13,7 +13,45 @@ class CsvFilterProxy(QSortFilterProxyModel):
         self._smart_columns: list[int] | None = None
         self._column_filters: dict[int, tuple[set[str], bool]] = {}
         self._fixed_rows: set[int] | None = None
+        self._bulk_update_depth = 0
+        self._restore_dynamic_sort = True
+        self._sort_key_cache: list[tuple[int, float | str]] | None = None
+        self._sort_key_column = -1
         self.setDynamicSortFilter(True)
+
+    def setSourceModel(self, model):
+        current = self.sourceModel()
+        if current is not None:
+            current.modelAboutToBeReset.disconnect(self._clear_sort_cache)
+            current.modelReset.disconnect(self._clear_sort_cache)
+        super().setSourceModel(model)
+        self._clear_sort_cache()
+        if model is not None:
+            model.modelAboutToBeReset.connect(self._clear_sort_cache)
+            model.modelReset.connect(self._clear_sort_cache)
+
+    def begin_bulk_update(self) -> None:
+        if self._bulk_update_depth == 0:
+            self._restore_dynamic_sort = self.dynamicSortFilter()
+            self.setDynamicSortFilter(False)
+        self._bulk_update_depth += 1
+
+    def end_bulk_update(self) -> None:
+        if self._bulk_update_depth <= 0:
+            return
+        self._bulk_update_depth -= 1
+        if self._bulk_update_depth == 0:
+            self.setDynamicSortFilter(self._restore_dynamic_sort)
+            self.invalidateFilter()
+
+    def invalidateFilter(self):
+        if self._bulk_update_depth:
+            return
+        super().invalidateFilter()
+
+    def _clear_sort_cache(self, *_args) -> None:
+        self._sort_key_cache = None
+        self._sort_key_column = -1
 
     def set_search_text(self, text: str):
         self._tokens = [part.casefold() for part in str(text or "").split() if part]
@@ -96,12 +134,49 @@ class CsvFilterProxy(QSortFilterProxyModel):
                 return False
         return True
 
+    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
+        self._build_sort_key_cache(column)
+        super().sort(column, order)
+
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
-        left_value = str(self.sourceModel().data(left) or "").strip()
-        right_value = str(self.sourceModel().data(right) or "").strip()
-        try:
-            return float(left_value.replace(",", "")) < float(
-                right_value.replace(",", "")
-            )
-        except ValueError:
-            return left_value.casefold() < right_value.casefold()
+        column = left.column()
+        if column != self._sort_key_column or self._sort_key_cache is None:
+            self._build_sort_key_cache(column)
+        cache = self._sort_key_cache
+        assert cache is not None
+        return cache[left.row()] < cache[right.row()]
+
+    @staticmethod
+    def _sort_key(value: str) -> tuple[int, float | str]:
+        cleaned = value.replace(",", "")
+        if cleaned:
+            body = cleaned[1:] if cleaned.startswith("-") else cleaned
+            if body and body.replace(".", "", 1).isdigit() and body.count(".") <= 1:
+                try:
+                    return (0, float(cleaned))
+                except ValueError:
+                    pass
+        return (1, value.casefold())
+
+    def _build_sort_key_cache(self, column: int) -> None:
+        model = self.sourceModel()
+        if model is None:
+            self._sort_key_cache = []
+            self._sort_key_column = column
+            return
+        row_values = getattr(model, "row_values", None)
+        keys: list[tuple[int, float | str]] = []
+        value_keys: dict[str, tuple[int, float | str]] = {}
+        for row in range(model.rowCount()):
+            if callable(row_values):
+                values = row_values(row)
+                cell = str(values[column] if column < len(values) else "").strip()
+            else:
+                cell = str(model.data(model.index(row, column)) or "").strip()
+            key = value_keys.get(cell)
+            if key is None:
+                key = self._sort_key(cell)
+                value_keys[cell] = key
+            keys.append(key)
+        self._sort_key_cache = keys
+        self._sort_key_column = column

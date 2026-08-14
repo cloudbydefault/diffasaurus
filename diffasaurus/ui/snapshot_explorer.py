@@ -36,6 +36,8 @@ from diffasaurus.ui.background import BackgroundCall
 from diffasaurus.ui.dashboard_view import DashboardView
 from diffasaurus.ui.configuration_policy_presentation import count_semantic_settings
 
+LARGE_SNAPSHOT_ROW_THRESHOLD = 20_000
+
 
 def load_policy_snapshot_payload(report_dir: Path, snapshot: ReportSnapshot):
     descriptor = resolve_bundle_for_anchor(report_dir, snapshot)
@@ -114,6 +116,7 @@ class SnapshotExplorer(QWidget):
         self.loaded_path: Path | None = None
         self._filters: dict = {}
         self._generation = 0
+        self._last_snapshot_was_large = False
         self._tasks: set[BackgroundCall] = set()
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
@@ -182,7 +185,7 @@ class SnapshotExplorer(QWidget):
         table_layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableView()
         self.table.setModel(self.proxy)
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -273,6 +276,7 @@ class SnapshotExplorer(QWidget):
             self.model.set_table([], [])
             self.status.setText("No snapshots available for this family")
             self.loaded_path = None
+            self._last_snapshot_was_large = False
 
     def activate(self):
         snapshot = self.snapshot_combo.currentData()
@@ -333,14 +337,41 @@ class SnapshotExplorer(QWidget):
         if generation != self._generation:
             return
         headers, rows, delimiter, title, stats = payload
-        self.model.set_table(headers, rows, delimiter)
-        self.loaded_path = snapshot.path
-        self._configure_smart_search()
-        self.clear_filters()
+        large_snapshot = len(rows) >= LARGE_SNAPSHOT_ROW_THRESHOLD
+        header = self.table.horizontalHeader()
+        prior_sort_column = header.sortIndicatorSection()
+        prior_sort_order = header.sortIndicatorOrder()
+        had_prior_snapshot = self.loaded_path is not None
+        self.table.setSortingEnabled(False)
+        self.proxy.begin_bulk_update()
+        try:
+            self.model.set_table(headers, rows, delimiter)
+            self.loaded_path = snapshot.path
+            self._configure_smart_search()
+            self._reset_filters_after_load()
+        finally:
+            if large_snapshot:
+                header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+            self.proxy.end_bulk_update()
+        self.table.setSortingEnabled(True)
+        if not large_snapshot:
+            if (
+                had_prior_snapshot
+                and not self._last_snapshot_was_large
+                and prior_sort_column >= 0
+            ):
+                sort_column = prior_sort_column
+                sort_order = prior_sort_order
+            else:
+                sort_column = 0
+                sort_order = Qt.SortOrder.AscendingOrder
+            self.table.sortByColumn(sort_column, sort_order)
+        self._last_snapshot_was_large = large_snapshot
         self.dashboard.build_dashboard(title or "Snapshot Dashboard", stats or [])
         self.progress.hide()
         self.snapshot_combo.setEnabled(True)
         self.filter_button.setEnabled(bool(headers))
+        self._update_status()
         self.status.setText(
             f"{len(rows):,} rows · {len(headers):,} columns · {snapshot.path.name}"
         )
@@ -440,6 +471,13 @@ class SnapshotExplorer(QWidget):
         self.proxy.set_search_text("")
         self.table.clearSelection()
         self._update_status()
+
+    def _reset_filters_after_load(self):
+        self._filters = {}
+        self.proxy.clear_filters()
+        self.search.clear()
+        self.proxy.set_search_text("")
+        self.table.clearSelection()
 
     def _column(self, name: str) -> int | None:
         wanted = str(name or "").strip().casefold()

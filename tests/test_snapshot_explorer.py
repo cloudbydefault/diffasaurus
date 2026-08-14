@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -18,7 +19,7 @@ from diffasaurus.models.csv_model import CsvTableModel, read_csv_table
 from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.main_window import DiffasaurusWindow
 from diffasaurus.ui.multi_column_filter import collect_distinct_values
-from diffasaurus.ui.snapshot_explorer import SnapshotExplorer, load_snapshot_payload
+from diffasaurus.ui.snapshot_explorer import SnapshotExplorer, load_snapshot_payload, LARGE_SNAPSHOT_ROW_THRESHOLD
 
 
 def _drain_qt(*, thread_pools: list | None = None, events: int = 20) -> None:
@@ -97,6 +98,57 @@ def _wait_for_snapshot_load(explorer: SnapshotExplorer, timeout_ms: int = 5_000)
     for _ in range(20):
         QApplication.processEvents()
         QTest.qWait(25)
+
+
+MEMBERSHIP_HEADERS = [
+    "UserPrincipalName",
+    "UserDisplayName",
+    "UserMail",
+    "UserId",
+    "UserType",
+    "AccountEnabled",
+    "GroupId",
+    "GroupDisplayName",
+    "GroupMail",
+    "GroupType",
+    "MembershipType",
+    "AssignedDate",
+    "Source",
+    "Department",
+    "JobTitle",
+    "Office",
+    "Notes",
+]
+
+
+def _membership_row(index: int) -> list[str]:
+    group = index % 25
+    return [
+        f"user{index:05d}@example.com",
+        f"User {index:05d}",
+        f"user{index:05d}@example.com",
+        f"user-id-{index:05d}",
+        "Member",
+        "True",
+        f"group-id-{group:03d}",
+        f"Group {group:03d}",
+        f"group{group:03d}@example.com",
+        "Security",
+        "Assigned",
+        "2026-01-01",
+        "Entra",
+        "Engineering",
+        "Analyst",
+        "Paris",
+        f"note-{index:05d}",
+    ]
+
+
+def _write_membership_csv(path: Path, row_count: int) -> None:
+    lines = [",".join(MEMBERSHIP_HEADERS)]
+    for index in range(row_count):
+        lines.append(",".join(_membership_row(index)))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 class SnapshotExplorerTests(unittest.TestCase):
@@ -460,6 +512,271 @@ class SnapshotExplorerTests(unittest.TestCase):
                     ["RoleName", "Member"],
                 )
                 self.assertEqual(window.snapshot_explorer.loaded_path, path_b)
+
+    def test_proxy_sorts_numeric_values_before_text(self):
+        model = CsvTableModel(
+            ["Value"],
+            [["10"], ["2"], ["abc"], ["1"]],
+        )
+        proxy = CsvFilterProxy()
+        proxy.setSourceModel(model)
+        proxy.sort(0, Qt.SortOrder.AscendingOrder)
+        ordered = [proxy.data(proxy.index(row, 0)) for row in range(proxy.rowCount())]
+        self.assertEqual(ordered, ["1", "2", "10", "abc"])
+
+    def test_proxy_sorts_text_case_insensitively(self):
+        model = CsvTableModel(
+            ["Name"],
+            [["bravo"], ["Alpha"], ["charlie"]],
+        )
+        proxy = CsvFilterProxy()
+        proxy.setSourceModel(model)
+        proxy.sort(0, Qt.SortOrder.AscendingOrder)
+        ordered = [proxy.data(proxy.index(row, 0)) for row in range(proxy.rowCount())]
+        self.assertEqual(ordered, ["Alpha", "bravo", "charlie"])
+
+    def test_proxy_sort_cache_resets_on_model_reload(self):
+        model = CsvTableModel(["Name"], [["b"], ["a"]])
+        proxy = CsvFilterProxy()
+        proxy.setSourceModel(model)
+        proxy.sort(0, Qt.SortOrder.AscendingOrder)
+        self.assertEqual(proxy.data(proxy.index(0, 0)), "a")
+        model.set_table(["Name"], [["z"], ["y"]])
+        proxy.sort(0, Qt.SortOrder.DescendingOrder)
+        self.assertEqual(proxy.data(proxy.index(0, 0)), "z")
+
+    def test_large_snapshot_preserves_source_order_on_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memberships.csv"
+            _write_membership_csv(path, 150)
+            explorer = SnapshotExplorer()
+            try:
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.LARGE_SNAPSHOT_ROW_THRESHOLD",
+                    100,
+                ):
+                    explorer.set_snapshots([_make_snapshot(path, "Entra_Group_User_Memberships")])
+                    explorer.activate()
+                    _wait_for_snapshot_load(explorer)
+                self.assertEqual(explorer.model.rowCount(), 150)
+                self.assertEqual(explorer.proxy.rowCount(), 150)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 0)),
+                    "user00000@example.com",
+                )
+            finally:
+                _close_explorer(explorer)
+
+    def test_large_snapshot_explicit_sort_still_works(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memberships.csv"
+            _write_membership_csv(path, 150)
+            explorer = SnapshotExplorer()
+            try:
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.LARGE_SNAPSHOT_ROW_THRESHOLD",
+                    100,
+                ):
+                    explorer.set_snapshots([_make_snapshot(path, "Entra_Group_User_Memberships")])
+                    explorer.activate()
+                    _wait_for_snapshot_load(explorer)
+                explorer.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 0)),
+                    "user00000@example.com",
+                )
+                explorer.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 0)),
+                    "user00149@example.com",
+                )
+            finally:
+                _close_explorer(explorer)
+
+    def test_large_snapshot_search_and_filter_still_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memberships.csv"
+            _write_membership_csv(path, 150)
+            explorer = SnapshotExplorer()
+            try:
+                explorer.set_snapshots([_make_snapshot(path, "Entra_Group_User_Memberships")])
+                explorer.activate()
+                _wait_for_snapshot_load(explorer)
+                explorer.search.setText("user00100")
+                explorer._apply_search()
+                self.assertEqual(explorer.proxy.rowCount(), 1)
+                explorer.clear_filters()
+                explorer.proxy.set_column_allowed_values(7, {"Group 001"})
+                self.assertGreater(explorer.proxy.rowCount(), 0)
+                self.assertLess(explorer.proxy.rowCount(), 150)
+            finally:
+                _close_explorer(explorer)
+
+    def test_small_snapshot_auto_sorts_default_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "small.csv"
+            _write_csv(
+                path,
+                "Name,State\nCharlie,Enabled\nAlice,Enabled\nBob,Enabled\n",
+            )
+            explorer = SnapshotExplorer()
+            try:
+                explorer.set_snapshots([_make_snapshot(path)])
+                explorer.activate()
+                _wait_for_snapshot_load(explorer)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 0)),
+                    "Alice",
+                )
+            finally:
+                _close_explorer(explorer)
+
+    def test_small_snapshot_preserves_active_sort_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path_a = Path(directory) / "a.csv"
+            path_b = Path(directory) / "b.csv"
+            _write_csv(path_a, "Name,Rank\nCharlie,3\nAlice,1\nBob,2\n")
+            _write_csv(path_b, "Name,Rank\nZoe,9\nAmy,4\nMia,7\n")
+            explorer = SnapshotExplorer()
+            try:
+                explorer.set_snapshots(
+                    [_make_snapshot(path_a, "Users"), _make_snapshot(path_b, "Users")]
+                )
+                explorer.snapshot_combo.setCurrentIndex(1)
+                explorer.load_selected()
+                _wait_for_snapshot_load(explorer)
+                explorer.table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 1)),
+                    "1",
+                )
+
+                explorer.snapshot_combo.setCurrentIndex(0)
+                explorer.load_selected()
+                _wait_for_snapshot_load(explorer)
+                self.assertEqual(
+                    explorer.proxy.data(explorer.proxy.index(0, 1)),
+                    "4",
+                )
+            finally:
+                _close_explorer(explorer)
+
+    def test_small_to_large_snapshot_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            small_path = Path(directory) / "small.csv"
+            large_path = Path(directory) / "large.csv"
+            _write_csv(small_path, "Name,State\nCharlie,Enabled\nAlice,Enabled\n")
+            _write_membership_csv(large_path, 150)
+            explorer = SnapshotExplorer()
+            try:
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.LARGE_SNAPSHOT_ROW_THRESHOLD",
+                    100,
+                ):
+                    explorer.set_snapshots(
+                        [
+                            _make_snapshot(large_path, "Entra_Group_User_Memberships"),
+                            _make_snapshot(small_path, "Users"),
+                        ]
+                    )
+                    explorer.snapshot_combo.setCurrentIndex(0)
+                    explorer.load_selected()
+                    _wait_for_snapshot_load(explorer)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "Alice",
+                    )
+
+                    explorer.snapshot_combo.setCurrentIndex(1)
+                    explorer.load_selected()
+                    _wait_for_snapshot_load(explorer)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "user00000@example.com",
+                    )
+                    self.assertEqual(
+                        explorer.table.horizontalHeader().sortIndicatorSection(),
+                        -1,
+                    )
+            finally:
+                _close_explorer(explorer)
+
+    def test_large_to_small_snapshot_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            small_path = Path(directory) / "small.csv"
+            large_path = Path(directory) / "large.csv"
+            _write_csv(small_path, "Name,State\nCharlie,Enabled\nAlice,Enabled\n")
+            _write_membership_csv(large_path, 150)
+            explorer = SnapshotExplorer()
+            try:
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.LARGE_SNAPSHOT_ROW_THRESHOLD",
+                    100,
+                ):
+                    explorer.set_snapshots(
+                        [
+                            _make_snapshot(large_path, "Entra_Group_User_Memberships"),
+                            _make_snapshot(small_path, "Users"),
+                        ]
+                    )
+                    explorer.snapshot_combo.setCurrentIndex(1)
+                    explorer.load_selected()
+                    _wait_for_snapshot_load(explorer)
+                    explorer.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "user00149@example.com",
+                    )
+
+                    explorer.snapshot_combo.setCurrentIndex(0)
+                    explorer.load_selected()
+                    _wait_for_snapshot_load(explorer)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "Alice",
+                    )
+            finally:
+                _close_explorer(explorer)
+
+    def test_large_snapshot_reload_clears_explicit_sort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path_a = Path(directory) / "a.csv"
+            path_b = Path(directory) / "b.csv"
+            _write_membership_csv(path_a, 150)
+            _write_membership_csv(path_b, 150)
+            explorer = SnapshotExplorer()
+            try:
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.LARGE_SNAPSHOT_ROW_THRESHOLD",
+                    100,
+                ):
+                    explorer.set_snapshots(
+                        [
+                            _make_snapshot(path_b, "Entra_Group_User_Memberships"),
+                            _make_snapshot(path_a, "Entra_Group_User_Memberships"),
+                        ]
+                    )
+                    explorer.activate()
+                    _wait_for_snapshot_load(explorer)
+                    explorer.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "user00149@example.com",
+                    )
+
+                    explorer.snapshot_combo.setCurrentIndex(1)
+                    explorer.load_selected()
+                    _wait_for_snapshot_load(explorer)
+                    self.assertEqual(
+                        explorer.proxy.data(explorer.proxy.index(0, 0)),
+                        "user00000@example.com",
+                    )
+                    self.assertEqual(
+                        explorer.table.horizontalHeader().sortIndicatorSection(),
+                        -1,
+                    )
+            finally:
+                _close_explorer(explorer)
 
 
 if __name__ == "__main__":
