@@ -249,6 +249,7 @@ class FamilyChangeSection(QFrame):
                 "Intune_Android_Devices_Report",
                 "Intune_iOS_Devices",
                 "Intune_iOS_Devices_Report",
+                "Intune_ManagedDevices_Compliance",
                 "Intune_Devices_Autopilot",
             }:
                 added = item.summary.added
@@ -400,6 +401,7 @@ class FamilyChangeSection(QFrame):
                     "Intune_Android_Devices_Report",
                     "Intune_iOS_Devices",
                     "Intune_iOS_Devices_Report",
+                    "Intune_ManagedDevices_Compliance",
                     "Intune_Devices_Autopilot",
                     "Entra_Role_Assignments",
                 }:

@@ -3883,6 +3883,570 @@ class IntuneIOSDevicesPresentationTests(unittest.TestCase):
         self.assertEqual(comparison_summary_unit(self.REPORT_FAMILY), "devices")
 
 
+MANAGED_MD_ONE = "11111111-1111-1111-1111-111111111111"
+MANAGED_MD_TWO = "22222222-2222-2222-2222-222222222222"
+MANAGED_AAD_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+MANAGED_AAD_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+MANAGED_USER_ONE = "user-11111111-1111-1111-1111-111111111111"
+MANAGED_USER_TWO = "user-22222222-2222-2222-2222-222222222222"
+
+MANAGED_DEVICE_HEADERS = (
+    "UserPrincipalName",
+    "UserDisplayName",
+    "UserId",
+    "DeviceName",
+    "ManagedDeviceId",
+    "AzureADDeviceId",
+    "SerialNumber",
+    "Manufacturer",
+    "Model",
+    "OperatingSystem",
+    "OSVersion",
+    "ManagementAgent",
+    "EnrolledDateTime",
+    "LastSyncDateTime",
+    "ComplianceState",
+    "JailBroken",
+    "OwnerType",
+    "DaysSinceLastSync",
+    "DeviceActivityStatus",
+    "EmailAddress",
+    "PhoneNumber",
+)
+
+
+def managed_device_row(
+    *,
+    upn: str = "ada@example.com",
+    user_id: str = MANAGED_USER_ONE,
+    display_name: str = "Ada Lovelace",
+    managed_id: str = MANAGED_MD_ONE,
+    azure_id: str = MANAGED_AAD_ONE,
+    device_name: str = "Laptop-7",
+    serial: str = "SN-MANAGED-1",
+    os_version: str = "11",
+    compliance: str = "Compliant",
+    jailbroken: str = "False",
+    owner: str = "company",
+    activity: str = "Active<=30d",
+    last_sync: str = "2026-08-01T00:00:00Z",
+    days_since_sync: str = "5",
+    phone: str = "",
+    email: str = "ada@example.com",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "UserPrincipalName": upn,
+        "UserDisplayName": display_name,
+        "UserId": user_id,
+        "DeviceName": device_name,
+        "ManagedDeviceId": managed_id,
+        "AzureADDeviceId": azure_id,
+        "SerialNumber": serial,
+        "Manufacturer": "Dell",
+        "Model": "XPS 13",
+        "OperatingSystem": "Windows",
+        "OSVersion": os_version,
+        "ManagementAgent": "mdm",
+        "EnrolledDateTime": "2026-01-01T00:00:00Z",
+        "LastSyncDateTime": last_sync,
+        "ComplianceState": compliance,
+        "JailBroken": jailbroken,
+        "OwnerType": owner,
+        "DaysSinceLastSync": days_since_sync,
+        "DeviceActivityStatus": activity,
+        "EmailAddress": email,
+        "PhoneNumber": phone,
+    }
+    row.update(extra)
+    return row
+
+
+class IntuneManagedDevicesComparisonTests(unittest.TestCase):
+    FAMILY = "Intune_ManagedDevices_Compliance"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = managed_device_row()
+        for path, rows in (
+            (root / f"{self.FAMILY}_20260731-042100.csv", baseline_rows),
+            (root / f"{self.FAMILY}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_upn_collision_collapses_sibling_devices(self):
+        rows = [
+            managed_device_row(managed_id=MANAGED_MD_ONE, device_name="Laptop-A", serial="SN-A"),
+            managed_device_row(managed_id=MANAGED_MD_TWO, device_name="Laptop-B", serial="SN-B"),
+        ]
+        keyed = {}
+        for row in rows:
+            key = str(row.get("UserPrincipalName", "") or "").strip()
+            keyed[key] = row["DeviceName"]
+        self.assertEqual(len(keyed), 1)
+        self.assertEqual(keyed["ada@example.com"], "Laptop-B")
+
+    def test_multiple_devices_for_same_user_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(managed_id=MANAGED_MD_ONE, device_name="Laptop-A", serial="SN-A"),
+                    managed_device_row(managed_id=MANAGED_MD_TWO, device_name="Laptop-B", serial="SN-B"),
+                ],
+                [
+                    managed_device_row(managed_id=MANAGED_MD_ONE, device_name="Laptop-A", serial="SN-A"),
+                    managed_device_row(managed_id=MANAGED_MD_TWO, device_name="Laptop-B", serial="SN-B"),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_managed_device_id_is_preferred_key(self):
+        headers = list(MANAGED_DEVICE_HEADERS)
+        self.assertEqual(suggested_key(headers, self.FAMILY), "ManagedDeviceId")
+
+    def test_fallback_to_azure_ad_device_id_when_managed_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(
+                        managed_id="",
+                        azure_id=MANAGED_AAD_ONE,
+                        compliance="Compliant",
+                    ),
+                ],
+                [
+                    managed_device_row(
+                        managed_id="",
+                        azure_id=MANAGED_AAD_ONE,
+                        compliance="NonCompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_fallback_to_serial_number_when_managed_and_azure_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(
+                        managed_id="",
+                        azure_id="",
+                        serial="SN-ONLY-1",
+                        compliance="Compliant",
+                    ),
+                ],
+                [
+                    managed_device_row(
+                        managed_id="",
+                        azure_id="",
+                        serial="SN-ONLY-1",
+                        compliance="NonCompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_device_name_rename_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(device_name="Old Laptop Name")],
+                [managed_device_row(device_name="New Laptop Name")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "DeviceName")
+            self.assertEqual(detail_identity(changed), "New Laptop Name · SN-MANAGED-1")
+
+    def test_user_reassignment_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(user_id=MANAGED_USER_ONE, upn="ada@example.com")],
+                [
+                    managed_device_row(
+                        user_id=MANAGED_USER_TWO,
+                        upn="bob@example.com",
+                        display_name="Bob Builder",
+                        email="bob@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("UserId", columns)
+            self.assertNotIn("UserPrincipalName", columns)
+            self.assertNotIn("UserDisplayName", columns)
+            self.assertNotIn("EmailAddress", columns)
+
+    def test_same_user_id_with_upn_rename_does_not_create_device_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(
+                        user_id=MANAGED_USER_ONE,
+                        upn="ada@example.com",
+                        display_name="Ada Lovelace",
+                        email="ada@example.com",
+                    ),
+                ],
+                [
+                    managed_device_row(
+                        user_id=MANAGED_USER_ONE,
+                        upn="ada.lovelace@example.com",
+                        display_name="Ada L.",
+                        email="ada.lovelace@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_legacy_rows_without_user_id_use_upn_for_association_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(
+                        user_id="",
+                        upn="ada@example.com",
+                        display_name="Ada Lovelace",
+                        email="ada@example.com",
+                    ),
+                ],
+                [
+                    managed_device_row(
+                        user_id="",
+                        upn="bob@example.com",
+                        display_name="Bob Builder",
+                        email="bob@example.com",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("UserPrincipalName", columns)
+
+    def test_friendly_added_and_removed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(managed_id=MANAGED_MD_ONE, device_name="Removed Laptop", serial="SN-REMOVE")],
+                [managed_device_row(managed_id=MANAGED_MD_TWO, device_name="Added Laptop", serial="SN-ADD")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Added Laptop · SN-ADD")
+            self.assertEqual(detail_identity(removed), "Removed Laptop · SN-REMOVE")
+
+    def test_last_sync_date_time_excluded_from_semantic_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(last_sync="2026-08-01T00:00:00Z")],
+                [managed_device_row(last_sync="2026-08-04T12:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_days_since_last_sync_only_drift_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(days_since_sync="5", last_sync="2026-08-01T00:00:00Z")],
+                [managed_device_row(days_since_sync="6", last_sync="2026-08-01T00:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_device_activity_status_threshold_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(activity="Active<=30d", days_since_sync="10")],
+                [managed_device_row(activity="Stale31-90d", days_since_sync="45")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "DeviceActivityStatus")
+            self.assertEqual(changed["before"], "Active<=30d")
+            self.assertEqual(changed["after"], "Stale31-90d")
+
+    def test_posture_property_changes_remain_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    managed_device_row(
+                        compliance="Compliant",
+                        os_version="11",
+                        jailbroken="False",
+                        owner="company",
+                    ),
+                ],
+                [
+                    managed_device_row(
+                        compliance="NonCompliant",
+                        os_version="11.1",
+                        jailbroken="True",
+                        owner="personal",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("ComplianceState", columns)
+            self.assertIn("OSVersion", columns)
+            self.assertIn("JailBroken", columns)
+            self.assertIn("OwnerType", columns)
+
+    def test_phone_number_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [managed_device_row(phone="")],
+                [managed_device_row(phone="555-0100")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "PhoneNumber")
+            self.assertEqual(changed["before"], "")
+            self.assertEqual(changed["after"], "555-0100")
+
+    def test_property_frequency_after_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = [
+                managed_device_row(
+                    managed_id=MANAGED_MD_ONE,
+                    compliance="Compliant",
+                    os_version="11",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+                managed_device_row(
+                    managed_id=MANAGED_MD_TWO,
+                    device_name="Laptop-8",
+                    serial="SN-MANAGED-2",
+                    compliance="Compliant",
+                    os_version="11",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+            ]
+            latest_rows = [
+                managed_device_row(
+                    managed_id=MANAGED_MD_ONE,
+                    compliance="NonCompliant",
+                    os_version="11",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+                managed_device_row(
+                    managed_id=MANAGED_MD_TWO,
+                    device_name="Laptop-8",
+                    serial="SN-MANAGED-2",
+                    compliance="Compliant",
+                    os_version="11.1",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 2)
+            histogram: dict[str, int] = {}
+            for detail in result.details:
+                if detail["change"] != "Changed":
+                    continue
+                histogram[detail["column"]] = histogram.get(detail["column"], 0) + 1
+            self.assertNotIn("LastSyncDateTime", histogram)
+            self.assertNotIn("DaysSinceLastSync", histogram)
+            self.assertEqual(histogram.get("ComplianceState"), 1)
+            self.assertEqual(histogram.get("OSVersion"), 1)
+
+    def test_android_last_sync_exclusion_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = android_device_row(last_sync="2026-08-01T00:00:00Z")
+            for stamp, last_sync in (
+                ("20260731-042100", "2026-08-01T00:00:00Z"),
+                ("20260804-042100", "2026-08-04T12:00:00Z"),
+            ):
+                updated = dict(row)
+                updated["LastSyncDateTime"] = last_sync
+                write_report(root / f"Intune_Android_Devices_{stamp}.csv", [updated])
+            snapshots = scan_report_history(root)["Intune_Android_Devices"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                suggested_key(snapshots[0].headers, "Intune_Android_Devices"),
+                "Intune_Android_Devices",
+            )
+            self.assertEqual(result.total_changes, 0)
+
+    def test_ios_free_storage_exclusion_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = ios_device_row()
+            for path, rows in (
+                (root / "Intune_iOS_Devices_20260731-042100.csv", [ios_device_row(free_storage="64")]),
+                (root / "Intune_iOS_Devices_20260804-042100.csv", [ios_device_row(free_storage="32")]),
+            ):
+                with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+            snapshots = scan_report_history(root)["Intune_iOS_Devices"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                suggested_key(snapshots[0].headers, "Intune_iOS_Devices"),
+                "Intune_iOS_Devices",
+            )
+            self.assertEqual(result.total_changes, 0)
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class IntuneManagedDevicesPresentationTests(unittest.TestCase):
+    FAMILY = "Intune_ManagedDevices_Compliance"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("DeviceName", self.FAMILY), "Device name")
+        self.assertEqual(property_display_text("ComplianceState", self.FAMILY), "Compliance state")
+        self.assertEqual(property_display_text("UserId", self.FAMILY), "User ID")
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Device")
+        tooltip = property_tooltip("DeviceActivityStatus", self.FAMILY)
+        self.assertIn("Activity status", tooltip)
+        self.assertIn("CSV field: DeviceActivityStatus", tooltip)
+
+    def test_identity_tooltip_excludes_phone_and_email(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Laptop-7 · SN-MANAGED-1",
+            "device_name": "Laptop-7",
+            "serial_number": "SN-MANAGED-1",
+            "managed_device_id": MANAGED_MD_ONE,
+            "azure_ad_device_id": MANAGED_AAD_ONE,
+            "user_display_name": "Ada Lovelace",
+            "UserPrincipalName": "ada@example.com",
+            "user_id": MANAGED_USER_ONE,
+            "PhoneNumber": "555-0100",
+            "EmailAddress": "ada@example.com",
+            "key": MANAGED_MD_ONE,
+        }
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("Laptop-7 · SN-MANAGED-1", tooltip)
+        self.assertIn("ManagedDeviceId:", tooltip)
+        self.assertIn("UserId:", tooltip)
+        self.assertNotIn("555-0100", tooltip)
+        self.assertNotIn("EmailAddress:", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": MANAGED_MD_ONE,
+                    "identity": "Laptop-7 · SN-MANAGED-1",
+                    "column": "ComplianceState",
+                    "before": "Compliant",
+                    "after": "NonCompliant",
+                    "device_name": "Laptop-7",
+                    "serial_number": "SN-MANAGED-1",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Laptop-7 · SN-MANAGED-1")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Compliance state")
+
+    def test_recent_changes_summary_uses_device_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="ManagedDeviceId",
+            summary=ComparisonSummary(added=6, removed=4, changed=20, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "6 devices added · 4 devices removed · 20 devices changed",
+        )
+
+    def test_comparison_summary_unit_uses_devices(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
+
+
 AUTOPILOT_OBJECT_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 AUTOPILOT_OBJECT_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 AUTOPILOT_AAD_ONE = "cccccccc-cccc-cccc-cccc-cccccccccccc"

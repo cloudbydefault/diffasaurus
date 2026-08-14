@@ -15,6 +15,7 @@ from diffasaurus.core.report_history import (
     is_android_devices_family,
     is_autopilot_devices_family,
     is_ios_devices_family,
+    is_managed_devices_family,
     is_role_assignments_family,
 )
 
@@ -213,6 +214,30 @@ IOS_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "HasActivationBypassCode": "Has activation bypass code",
 }
 
+MANAGED_DEVICE_PROPERTY_LABELS: dict[str, str] = {
+    "UserPrincipalName": "User principal name",
+    "UserDisplayName": "User display name",
+    "UserId": "User ID",
+    "DeviceName": "Device name",
+    "ManagedDeviceId": "Managed device ID",
+    "AzureADDeviceId": "Entra device ID",
+    "SerialNumber": "Serial number",
+    "Manufacturer": "Manufacturer",
+    "Model": "Model",
+    "OperatingSystem": "Operating system",
+    "OSVersion": "OS version",
+    "ManagementAgent": "Management agent",
+    "EnrolledDateTime": "Enrolled",
+    "LastSyncDateTime": "Last sync",
+    "ComplianceState": "Compliance state",
+    "JailBroken": "Jailbroken",
+    "OwnerType": "Ownership",
+    "DaysSinceLastSync": "Days since last sync",
+    "DeviceActivityStatus": "Activity status",
+    "EmailAddress": "Email address",
+    "PhoneNumber": "Phone number",
+}
+
 AUTOPILOT_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "DisplayName": "Display name",
     "SerialNumber": "Serial number",
@@ -293,6 +318,8 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return ANDROID_DEVICE_PROPERTY_LABELS
     if is_ios_devices_family(family):
         return IOS_DEVICE_PROPERTY_LABELS
+    if is_managed_devices_family(family):
+        return MANAGED_DEVICE_PROPERTY_LABELS
     if is_autopilot_devices_family(family):
         return AUTOPILOT_DEVICE_PROPERTY_LABELS
     if is_role_assignments_family(family):
@@ -304,6 +331,7 @@ def _is_device_identity_family(family: str | None) -> bool:
     return (
         is_android_devices_family(family)
         or is_ios_devices_family(family)
+        or is_managed_devices_family(family)
         or is_autopilot_devices_family(family)
     )
 
@@ -372,6 +400,24 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
         upn = detail.get("UserPrincipalName")
         if upn:
             parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
+    if is_managed_devices_family(family):
+        parts = [identity]
+        if detail.get("device_name"):
+            parts.append(f"DeviceName: {detail['device_name']}")
+        if detail.get("serial_number"):
+            parts.append(f"SerialNumber: {detail['serial_number']}")
+        if detail.get("managed_device_id"):
+            parts.append(f"ManagedDeviceId: {detail['managed_device_id']}")
+        if detail.get("azure_ad_device_id"):
+            parts.append(f"AzureADDeviceId: {detail['azure_ad_device_id']}")
+        if detail.get("user_display_name"):
+            parts.append(f"UserDisplayName: {detail['user_display_name']}")
+        upn = detail.get("UserPrincipalName")
+        if upn:
+            parts.append(f"UserPrincipalName: {upn}")
+        if detail.get("user_id"):
+            parts.append(f"UserId: {detail['user_id']}")
         return "\n".join(parts)
     if is_autopilot_devices_family(family):
         parts = [identity]
