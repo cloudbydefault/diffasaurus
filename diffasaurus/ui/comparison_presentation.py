@@ -14,6 +14,7 @@ from diffasaurus.core.report_history import (
     detail_identity,
     is_android_devices_family,
     is_autopilot_devices_family,
+    is_ios_devices_family,
     is_role_assignments_family,
 )
 
@@ -168,6 +169,50 @@ ANDROID_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "FreeStorageGB": "Free storage (GB)",
 }
 
+IOS_DEVICE_PROPERTY_LABELS: dict[str, str] = {
+    "DeviceName": "Device name",
+    "ManagementName": "Management name",
+    "IntuneDeviceId": "Intune device ID",
+    "EntraDeviceId": "Entra device ID",
+    "UDID": "UDID",
+    "SerialNumber": "Serial number",
+    "IMEI": "IMEI",
+    "MEID": "MEID",
+    "Manufacturer": "Manufacturer",
+    "Model": "Model",
+    "OperatingSystem": "Operating system",
+    "OSVersion": "OS version",
+    "UserDisplayName": "User display name",
+    "UserPrincipalName": "User principal name",
+    "EmailAddress": "Email address",
+    "PhoneNumber": "Phone number",
+    "OwnerType": "Ownership",
+    "ManagementAgent": "Management agent",
+    "ManagementState": "Management state",
+    "DeviceEnrollmentType": "Enrollment type",
+    "EnrollmentProfileName": "Enrollment profile",
+    "EnrolledDateTime": "Enrolled",
+    "LastSyncDateTime": "Last sync",
+    "DaysSinceLastSync": "Days since last sync",
+    "DeviceActivityStatus": "Activity status",
+    "ComplianceState": "Compliance state",
+    "AzureADRegistered": "Entra registered",
+    "IsSupervised": "Supervised",
+    "IsEncrypted": "Encrypted",
+    "JailBroken": "Jailbroken",
+    "EASActivated": "Exchange ActiveSync enabled",
+    "EASActivationId": "Exchange ActiveSync activation ID",
+    "EASActivationDateTime": "Exchange ActiveSync activation",
+    "SubscriberCarrier": "Subscriber carrier",
+    "CellularTechnology": "Cellular technology",
+    "WiFiMacAddress": "Wi-Fi MAC address",
+    "EthernetMacAddress": "Ethernet MAC address",
+    "ICCID": "ICCID",
+    "TotalStorageGB": "Total storage (GB)",
+    "FreeStorageGB": "Free storage (GB)",
+    "HasActivationBypassCode": "Has activation bypass code",
+}
+
 AUTOPILOT_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "DisplayName": "Display name",
     "SerialNumber": "Serial number",
@@ -246,6 +291,8 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return USER_PROPERTIES_PROPERTY_LABELS
     if is_android_devices_family(family):
         return ANDROID_DEVICE_PROPERTY_LABELS
+    if is_ios_devices_family(family):
+        return IOS_DEVICE_PROPERTY_LABELS
     if is_autopilot_devices_family(family):
         return AUTOPILOT_DEVICE_PROPERTY_LABELS
     if is_role_assignments_family(family):
@@ -254,7 +301,11 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
 
 
 def _is_device_identity_family(family: str | None) -> bool:
-    return is_android_devices_family(family) or is_autopilot_devices_family(family)
+    return (
+        is_android_devices_family(family)
+        or is_ios_devices_family(family)
+        or is_autopilot_devices_family(family)
+    )
 
 
 def _is_semantic_detail_family(family: str | None) -> bool:
@@ -302,6 +353,22 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
             parts.append(f"EntraDeviceId: {detail['entra_device_id']}")
         if detail.get("intune_device_id"):
             parts.append(f"IntuneDeviceId: {detail['intune_device_id']}")
+        upn = detail.get("UserPrincipalName")
+        if upn:
+            parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
+    if is_ios_devices_family(family):
+        parts = [identity]
+        if detail.get("device_name"):
+            parts.append(f"DeviceName: {detail['device_name']}")
+        if detail.get("serial_number"):
+            parts.append(f"SerialNumber: {detail['serial_number']}")
+        if detail.get("entra_device_id"):
+            parts.append(f"EntraDeviceId: {detail['entra_device_id']}")
+        if detail.get("intune_device_id"):
+            parts.append(f"IntuneDeviceId: {detail['intune_device_id']}")
+        if detail.get("udid"):
+            parts.append(f"UDID: {detail['udid']}")
         upn = detail.get("UserPrincipalName")
         if upn:
             parts.append(f"UserPrincipalName: {upn}")
