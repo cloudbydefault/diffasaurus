@@ -106,12 +106,26 @@ FAMILY_RELATIONSHIP_IDENTITY: dict[str, dict[str, tuple[str, ...]]] = {
 
 AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
 USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
+ANDROID_DEVICES_FAMILY = "Intune_Android_Devices"
+ANDROID_DEVICES_REPORT_FAMILY = "Intune_Android_Devices_Report"
+
+RECENT_CHANGES_FAMILY_ALIASES: dict[str, str] = {
+    ANDROID_DEVICES_REPORT_FAMILY: ANDROID_DEVICES_FAMILY,
+}
+
+ANDROID_DEVICES_EXCLUDED_COLUMNS = frozenset(
+    {
+        "DaysSinceLastSync",
+        "LastSyncDateTime",
+    }
+)
 
 FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     AUTH_METHODS_HYBRID_FAMILY: frozenset({"LastUpdatedDateTime"}),
     USER_PROPERTIES_FAMILY: frozenset(
         {"ManagerStatus", "ManagerError", "SponsorsStatus", "SponsorsError"}
     ),
+    ANDROID_DEVICES_FAMILY: ANDROID_DEVICES_EXCLUDED_COLUMNS,
 }
 
 AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
@@ -138,6 +152,21 @@ USER_PROPERTIES_MANAGER_COLUMNS = frozenset({"ManagerDisplayName", "ManagerUPN"}
 USER_PROPERTIES_SPONSOR_COLUMNS = frozenset({"Sponsors"})
 
 _COLLECTION_VALUE_SPLIT_RE = re.compile(r"\s*;\s*")
+
+
+def canonical_comparison_family(family: str | None) -> str | None:
+    if not family:
+        return family
+    return RECENT_CHANGES_FAMILY_ALIASES.get(family, family)
+
+
+def is_android_devices_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == ANDROID_DEVICES_FAMILY
+
+
+def _comparison_excluded_columns(family: str | None) -> frozenset[str]:
+    canonical = canonical_comparison_family(family)
+    return FAMILY_COMPARISON_EXCLUDED_COLUMNS.get(canonical or "", frozenset())
 
 _ANALYSIS_CACHE: dict[
     tuple[str, str, str, int, int],
@@ -470,8 +499,9 @@ def suggested_key(
         return composite_label
     normalized = {header.lower(): header for header in headers}
     preferred = (
-        FAMILY_PREFERRED_KEYS[family]
-        if family and family in FAMILY_PREFERRED_KEYS
+        FAMILY_PREFERRED_KEYS[canonical]
+        if family
+        and (canonical := canonical_comparison_family(family)) in FAMILY_PREFERRED_KEYS
         else PREFERRED_KEYS
     )
     for candidate in preferred:
@@ -544,6 +574,12 @@ def _comparison_row_key(
         if policy_id:
             return f"{package_id}{COMPOSITE_KEY_DELIMITER}{policy_id}"
         return package_id
+    if is_android_devices_family(family):
+        for column in ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"):
+            value = str(row.get(column, "") or "").strip()
+            if value:
+                return value
+        return ""
     if use_composite:
         parts = [str(row.get(column, "") or "").strip() for column in key_columns]
         return COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
@@ -577,7 +613,7 @@ def comparison_summary_unit(family: str | None) -> str:
         USER_PROPERTIES_FAMILY,
     }:
         return "users"
-    if family in _DEVICE_COMPARISON_FAMILIES:
+    if family in _DEVICE_COMPARISON_FAMILIES or is_android_devices_family(family):
         return "devices"
     return "rows"
 
@@ -743,6 +779,35 @@ def _display_name_upn_identity_label(
     return key
 
 
+def _android_device_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+    serial = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+    if device_name and serial:
+        return f"{device_name} · {serial}"
+    if device_name:
+        return device_name
+    if serial:
+        return serial
+    entra_id = _pick_identity_label(primary_row, fallback_row, ("EntraDeviceId",))
+    if entra_id:
+        return entra_id
+    intune_id = _pick_identity_label(primary_row, fallback_row, ("IntuneDeviceId",))
+    if intune_id:
+        return intune_id
+    return key
+
+
 def _user_activity_identity_label(
     key: str,
     change: str,
@@ -874,7 +939,42 @@ def _attach_detail_identity(
         if upn:
             detail["UPN"] = upn
         return
-    identity_columns = FAMILY_IDENTITY_DISPLAY.get(family or "", ())
+    if is_android_devices_family(family):
+        detail["identity"] = _android_device_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+        if device_name:
+            detail["device_name"] = device_name
+        serial_number = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+        if serial_number:
+            detail["serial_number"] = serial_number
+        entra_device_id = _pick_identity_label(primary_row, fallback_row, ("EntraDeviceId",))
+        if entra_device_id:
+            detail["entra_device_id"] = entra_device_id
+        intune_device_id = _pick_identity_label(primary_row, fallback_row, ("IntuneDeviceId",))
+        if intune_device_id:
+            detail["intune_device_id"] = intune_device_id
+        user_principal_name = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("UserPrincipalName",),
+        )
+        if user_principal_name:
+            detail["UserPrincipalName"] = user_principal_name
+        return
+    identity_columns = FAMILY_IDENTITY_DISPLAY.get(canonical_comparison_family(family) or family or "", ())
     if identity_columns:
         before_row = before_map.get(key, {})
         after_row = after_map.get(key, {})
@@ -968,7 +1068,9 @@ def _compare_snapshots(
     details: list[dict[str, str]] = []
     display_column = identity_display_column(family, common) if include_details else ""
     skip_columns = set(key_columns)
-    excluded_columns = FAMILY_COMPARISON_EXCLUDED_COLUMNS.get(family or "", frozenset())
+    if is_android_devices_family(family):
+        skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber"))
+    excluded_columns = _comparison_excluded_columns(family)
 
     if include_details:
         for key in added_keys:

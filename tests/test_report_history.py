@@ -2685,6 +2685,571 @@ class EntraUserPropertiesPresentationTests(unittest.TestCase):
         self.assertEqual(comparison_summary_unit("Entra_Users_Properties"), "users")
 
 
+ANDROID_AAD_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+ANDROID_AAD_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+ANDROID_INTUNE_ONE = "11111111-1111-1111-1111-111111111111"
+ANDROID_INTUNE_TWO = "22222222-2222-2222-2222-222222222222"
+
+ANDROID_DEVICE_HEADERS = (
+    "DeviceName",
+    "ManagementName",
+    "IntuneDeviceId",
+    "EntraDeviceId",
+    "SerialNumber",
+    "Manufacturer",
+    "Model",
+    "OperatingSystem",
+    "OSVersion",
+    "AndroidSecurityPatchLevel",
+    "UserDisplayName",
+    "UserPrincipalName",
+    "EmailAddress",
+    "PhoneNumber",
+    "IMEI",
+    "MEID",
+    "ICCID",
+    "SubscriberCarrier",
+    "WiFiMacAddress",
+    "OwnerType",
+    "ManagementAgent",
+    "DeviceEnrollmentType",
+    "EnrollmentProfileName",
+    "DeviceRegistrationState",
+    "EnrolledDateTime",
+    "ManagementCertificateExpiration",
+    "LastSyncDateTime",
+    "DaysSinceLastSync",
+    "DeviceActivityStatus",
+    "ComplianceState",
+    "ComplianceGracePeriodExpiration",
+    "AzureADRegistered",
+    "IsEncrypted",
+    "Rooted",
+    "PartnerReportedThreatState",
+    "EASActivated",
+    "EASDeviceId",
+    "EASActivationDateTime",
+    "TotalStorageGB",
+    "FreeStorageGB",
+)
+
+
+def android_device_row(
+    *,
+    entra_id: str = ANDROID_AAD_ONE,
+    intune_id: str = ANDROID_INTUNE_ONE,
+    device_name: str = "Pixel-7",
+    serial: str = "SN-ANDROID-1",
+    os_version: str = "14",
+    patch: str = "2026-07-01",
+    compliance: str = "compliant",
+    encrypted: str = "True",
+    rooted: str = "False",
+    owner: str = "company",
+    activity: str = "Active <=30d",
+    user_upn: str = "ada@example.com",
+    manufacturer: str = "Google",
+    model: str = "Pixel 7",
+    imei: str = "",
+    phone: str = "",
+    iccid: str = "",
+    last_sync: str = "2026-08-01T00:00:00Z",
+    days_since_sync: str = "5",
+    free_storage: str = "64",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "DeviceName": device_name,
+        "ManagementName": device_name,
+        "IntuneDeviceId": intune_id,
+        "EntraDeviceId": entra_id,
+        "SerialNumber": serial,
+        "Manufacturer": manufacturer,
+        "Model": model,
+        "OperatingSystem": "Android",
+        "OSVersion": os_version,
+        "AndroidSecurityPatchLevel": patch,
+        "UserDisplayName": "Ada",
+        "UserPrincipalName": user_upn,
+        "EmailAddress": user_upn,
+        "PhoneNumber": phone,
+        "IMEI": imei,
+        "MEID": "",
+        "ICCID": iccid,
+        "SubscriberCarrier": "",
+        "WiFiMacAddress": "",
+        "OwnerType": owner,
+        "ManagementAgent": "mdm",
+        "DeviceEnrollmentType": "androidEnterpriseFullyManaged",
+        "EnrollmentProfileName": "Corporate Android",
+        "DeviceRegistrationState": "registered",
+        "EnrolledDateTime": "2026-01-01T00:00:00Z",
+        "ManagementCertificateExpiration": "",
+        "LastSyncDateTime": last_sync,
+        "DaysSinceLastSync": days_since_sync,
+        "DeviceActivityStatus": activity,
+        "ComplianceState": compliance,
+        "ComplianceGracePeriodExpiration": "",
+        "AzureADRegistered": "True",
+        "IsEncrypted": encrypted,
+        "Rooted": rooted,
+        "PartnerReportedThreatState": "",
+        "EASActivated": "False",
+        "EASDeviceId": "",
+        "EASActivationDateTime": "",
+        "TotalStorageGB": "128",
+        "FreeStorageGB": free_storage,
+    }
+    row.update(extra)
+    return row
+
+
+class IntuneAndroidDevicesComparisonTests(unittest.TestCase):
+    FAMILY = "Intune_Android_Devices"
+    REPORT_FAMILY = "Intune_Android_Devices_Report"
+
+    def _write_pair(
+        self,
+        root: Path,
+        baseline_rows,
+        latest_rows,
+        *,
+        family: str | None = None,
+    ):
+        family = family or self.FAMILY
+        template = android_device_row()
+        for path, rows in (
+            (root / f"{family}_20260731-042100.csv", baseline_rows),
+            (root / f"{family}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[family]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest, family: str | None = None):
+        family = family or baseline.family
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, family),
+            family,
+        )
+
+    def test_report_family_parses_report_suffix(self):
+        path = Path("Intune_Android_Devices_Report_20260812-170000.csv")
+        self.assertEqual(report_family(path), self.REPORT_FAMILY)
+
+    def test_entra_device_id_is_preferred_key(self):
+        headers = list(ANDROID_DEVICE_HEADERS)
+        self.assertEqual(suggested_key(headers, self.FAMILY), "EntraDeviceId")
+        self.assertEqual(suggested_key(headers, self.REPORT_FAMILY), "EntraDeviceId")
+
+    def test_legacy_report_family_uses_same_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, latest = self._write_pair(
+                root,
+                [android_device_row(compliance="compliant")],
+                [android_device_row(compliance="noncompliant")],
+                family=self.REPORT_FAMILY,
+            )
+            result = self._compare(baseline, latest, self.REPORT_FAMILY)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "ComplianceState")
+            self.assertEqual(detail_identity(changed), "Pixel-7 · SN-ANDROID-1")
+
+    def test_fallback_to_intune_device_id_when_entra_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(entra_id="", intune_id=ANDROID_INTUNE_ONE, compliance="compliant")],
+                [android_device_row(entra_id="", intune_id=ANDROID_INTUNE_ONE, compliance="noncompliant")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_fallback_to_serial_number_when_entra_and_intune_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    android_device_row(
+                        entra_id="",
+                        intune_id="",
+                        serial="SN-ONLY-1",
+                        compliance="compliant",
+                    ),
+                ],
+                [
+                    android_device_row(
+                        entra_id="",
+                        intune_id="",
+                        serial="SN-ONLY-1",
+                        compliance="noncompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_device_name_rename_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(device_name="Old Pixel Name")],
+                [android_device_row(device_name="New Pixel Name")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "DeviceName")
+            self.assertEqual(detail_identity(changed), "New Pixel Name · SN-ANDROID-1")
+
+    def test_friendly_added_and_removed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(device_name="Removed Pixel", serial="SN-REMOVE")],
+                [android_device_row(entra_id=ANDROID_AAD_TWO, intune_id=ANDROID_INTUNE_TWO, device_name="Added Pixel", serial="SN-ADD")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Added Pixel · SN-ADD")
+            self.assertEqual(detail_identity(removed), "Removed Pixel · SN-REMOVE")
+
+    def test_sensitive_ids_are_not_used_as_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    android_device_row(
+                        device_name="",
+                        serial="",
+                        entra_id="",
+                        intune_id=ANDROID_INTUNE_ONE,
+                        imei="IMEI-ONLY",
+                        phone="555-0100",
+                        iccid="ICCID-ONLY",
+                    ),
+                ],
+                [
+                    android_device_row(
+                        device_name="",
+                        serial="",
+                        entra_id="",
+                        intune_id=ANDROID_INTUNE_ONE,
+                        imei="IMEI-ONLY",
+                        phone="555-0100",
+                        iccid="ICCID-ONLY",
+                        compliance="noncompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            identity = detail_identity(changed)
+            self.assertEqual(identity, ANDROID_INTUNE_ONE)
+            self.assertNotIn("IMEI", identity)
+            self.assertNotIn("555-0100", identity)
+            self.assertNotIn("ICCID", identity)
+
+    def test_days_since_last_sync_only_drift_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(days_since_sync="5", last_sync="2026-08-01T00:00:00Z")],
+                [android_device_row(days_since_sync="6", last_sync="2026-08-01T00:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_last_sync_date_time_excluded_from_semantic_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(last_sync="2026-08-01T00:00:00Z")],
+                [android_device_row(last_sync="2026-08-04T12:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_collection_time_drift_does_not_flood_changed_devices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = []
+            latest_rows = []
+            for index in range(45):
+                entra_id = f"{index:08x}-0000-0000-0000-000000000001"
+                intune_id = f"{index:08x}-1111-1111-1111-111111111111"
+                baseline_rows.append(
+                    android_device_row(
+                        entra_id=entra_id,
+                        intune_id=intune_id,
+                        device_name=f"Device-{index}",
+                        serial=f"SN-{index}",
+                        last_sync="2026-08-01T00:00:00Z",
+                        days_since_sync="5",
+                    )
+                )
+                latest_rows.append(
+                    android_device_row(
+                        entra_id=entra_id,
+                        intune_id=intune_id,
+                        device_name=f"Device-{index}",
+                        serial=f"SN-{index}",
+                        last_sync=f"2026-08-0{index % 4 + 1}T12:00:00Z",
+                        days_since_sync=str(5 + index),
+                    )
+                )
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 0))
+
+    def test_device_activity_status_threshold_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(activity="Active <=30d", days_since_sync="10")],
+                [android_device_row(activity="Stale 31-90d", days_since_sync="45")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "DeviceActivityStatus")
+            self.assertEqual(changed["before"], "Active <=30d")
+            self.assertEqual(changed["after"], "Stale 31-90d")
+
+    def test_posture_property_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(compliance="compliant", os_version="14")],
+                [android_device_row(compliance="noncompliant", os_version="15")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("ComplianceState", columns)
+            self.assertIn("OSVersion", columns)
+
+    def test_free_storage_gb_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [android_device_row(free_storage="64")],
+                [android_device_row(free_storage="32")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "FreeStorageGB")
+            self.assertEqual(changed["before"], "64")
+            self.assertEqual(changed["after"], "32")
+
+    def test_property_frequency_after_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = [
+                android_device_row(
+                    entra_id=ANDROID_AAD_ONE,
+                    compliance="compliant",
+                    os_version="14",
+                    free_storage="64",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+                android_device_row(
+                    entra_id=ANDROID_AAD_TWO,
+                    intune_id=ANDROID_INTUNE_TWO,
+                    device_name="Pixel-8",
+                    serial="SN-ANDROID-2",
+                    compliance="compliant",
+                    os_version="14",
+                    free_storage="48",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+            ]
+            latest_rows = [
+                android_device_row(
+                    entra_id=ANDROID_AAD_ONE,
+                    compliance="noncompliant",
+                    os_version="14",
+                    free_storage="64",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+                android_device_row(
+                    entra_id=ANDROID_AAD_TWO,
+                    intune_id=ANDROID_INTUNE_TWO,
+                    device_name="Pixel-8",
+                    serial="SN-ANDROID-2",
+                    compliance="compliant",
+                    os_version="15",
+                    free_storage="40",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 2)
+            histogram: dict[str, int] = {}
+            for detail in result.details:
+                if detail["change"] != "Changed":
+                    continue
+                histogram[detail["column"]] = histogram.get(detail["column"], 0) + 1
+            self.assertNotIn("LastSyncDateTime", histogram)
+            self.assertNotIn("DaysSinceLastSync", histogram)
+            self.assertEqual(histogram.get("ComplianceState"), 1)
+            self.assertEqual(histogram.get("OSVersion"), 1)
+            self.assertEqual(histogram.get("FreeStorageGB"), 1)
+
+    def test_ios_last_sync_remains_comparable(self):
+        ios_headers = list(ANDROID_DEVICE_HEADERS)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = android_device_row(last_sync="2026-08-01T00:00:00Z")
+            for stamp, last_sync in (
+                ("20260731-042100", "2026-08-01T00:00:00Z"),
+                ("20260804-042100", "2026-08-04T12:00:00Z"),
+            ):
+                updated = dict(row)
+                updated["LastSyncDateTime"] = last_sync
+                write_report(root / f"Intune_iOS_Devices_{stamp}.csv", [updated])
+            snapshots = scan_report_history(root)["Intune_iOS_Devices"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                suggested_key(ios_headers, "Intune_iOS_Devices"),
+                "Intune_iOS_Devices",
+            )
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "LastSyncDateTime")
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class IntuneAndroidDevicesPresentationTests(unittest.TestCase):
+    FAMILY = "Intune_Android_Devices"
+    REPORT_FAMILY = "Intune_Android_Devices_Report"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("DeviceName", self.FAMILY), "Device name")
+        self.assertEqual(property_display_text("ComplianceState", self.FAMILY), "Compliance state")
+        self.assertEqual(property_display_text("OSVersion", self.FAMILY), "OS version")
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Device")
+        self.assertEqual(property_display_text("", self.REPORT_FAMILY, change="Removed"), "Device")
+        self.assertEqual(property_display_text("FutureField", self.FAMILY), "FutureField")
+        tooltip = property_tooltip("WiFiMacAddress", self.FAMILY)
+        self.assertIn("Wi-Fi MAC address", tooltip)
+        self.assertIn("CSV field: WiFiMacAddress", tooltip)
+
+    def test_identity_tooltip_excludes_sensitive_ids(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Pixel-7 · SN-ANDROID-1",
+            "device_name": "Pixel-7",
+            "serial_number": "SN-ANDROID-1",
+            "entra_device_id": ANDROID_AAD_ONE,
+            "intune_device_id": ANDROID_INTUNE_ONE,
+            "UserPrincipalName": "ada@example.com",
+            "IMEI": "secret-imei",
+            "PhoneNumber": "555-0100",
+            "key": ANDROID_AAD_ONE,
+        }
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("Pixel-7 · SN-ANDROID-1", tooltip)
+        self.assertIn("EntraDeviceId:", tooltip)
+        self.assertIn("UserPrincipalName:", tooltip)
+        self.assertNotIn("IMEI", tooltip)
+        self.assertNotIn("555-0100", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": ANDROID_AAD_ONE,
+                    "identity": "Pixel-7 · SN-ANDROID-1",
+                    "column": "ComplianceState",
+                    "before": "compliant",
+                    "after": "noncompliant",
+                    "device_name": "Pixel-7",
+                    "serial_number": "SN-ANDROID-1",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Pixel-7 · SN-ANDROID-1")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Compliance state")
+
+    def test_recent_changes_summary_uses_device_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.REPORT_FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="EntraDeviceId",
+            summary=ComparisonSummary(added=1, removed=2, changed=5, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 device added · 2 devices removed · 5 devices changed",
+        )
+
+    def test_comparison_summary_unit_uses_devices(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
+        self.assertEqual(comparison_summary_unit(self.REPORT_FAMILY), "devices")
+
+
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Group_User_Memberships"
 

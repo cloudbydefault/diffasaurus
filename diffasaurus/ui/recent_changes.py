@@ -244,6 +244,18 @@ class FamilyChangeSection(QFrame):
                     f"{removed:,} user{'s' if removed != 1 else ''} removed · "
                     f"{changed:,} user{'s' if changed != 1 else ''} changed"
                 )
+            elif item.family in {
+                "Intune_Android_Devices",
+                "Intune_Android_Devices_Report",
+            }:
+                added = item.summary.added
+                removed = item.summary.removed
+                changed = item.summary.changed
+                self.counts_label.setText(
+                    f"{added:,} device{'s' if added != 1 else ''} added · "
+                    f"{removed:,} device{'s' if removed != 1 else ''} removed · "
+                    f"{changed:,} device{'s' if changed != 1 else ''} changed"
+                )
             else:
                 self.counts_label.setText(
                     f"{item.summary.added} added · {item.summary.removed} removed · "
@@ -372,6 +384,8 @@ class FamilyChangeSection(QFrame):
                     "Entra_Users_Activity",
                     "Entra_Users_AuthenticationMethods_Hybrid",
                     "Entra_Users_Properties",
+                    "Intune_Android_Devices",
+                    "Intune_Android_Devices_Report",
                 }:
                     matching.append(detail)
                 else:

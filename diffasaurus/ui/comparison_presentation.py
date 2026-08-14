@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from diffasaurus.core.report_history import detail_identity
+from diffasaurus.core.report_history import detail_identity, is_android_devices_family
 
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
 USER_ACTIVITY_FAMILY = "Entra_Users_Activity"
@@ -117,6 +117,49 @@ USER_PROPERTIES_PROPERTY_LABELS: dict[str, str] = {
     "Sponsors": "Sponsors",
 }
 
+ANDROID_DEVICE_PROPERTY_LABELS: dict[str, str] = {
+    "DeviceName": "Device name",
+    "ManagementName": "Management name",
+    "IntuneDeviceId": "Intune device ID",
+    "EntraDeviceId": "Entra device ID",
+    "SerialNumber": "Serial number",
+    "Manufacturer": "Manufacturer",
+    "Model": "Model",
+    "OperatingSystem": "Operating system",
+    "OSVersion": "OS version",
+    "AndroidSecurityPatchLevel": "Android security patch level",
+    "UserDisplayName": "User display name",
+    "UserPrincipalName": "User principal name",
+    "EmailAddress": "Email address",
+    "PhoneNumber": "Phone number",
+    "IMEI": "IMEI",
+    "MEID": "MEID",
+    "ICCID": "ICCID",
+    "SubscriberCarrier": "Subscriber carrier",
+    "WiFiMacAddress": "Wi-Fi MAC address",
+    "OwnerType": "Ownership",
+    "ManagementAgent": "Management agent",
+    "DeviceEnrollmentType": "Enrollment type",
+    "EnrollmentProfileName": "Enrollment profile",
+    "DeviceRegistrationState": "Registration state",
+    "EnrolledDateTime": "Enrolled",
+    "ManagementCertificateExpiration": "Management certificate expiration",
+    "LastSyncDateTime": "Last sync",
+    "DaysSinceLastSync": "Days since last sync",
+    "DeviceActivityStatus": "Activity status",
+    "ComplianceState": "Compliance state",
+    "ComplianceGracePeriodExpiration": "Compliance grace period expiration",
+    "AzureADRegistered": "Entra registered",
+    "IsEncrypted": "Encrypted",
+    "Rooted": "Rooted",
+    "PartnerReportedThreatState": "Threat state",
+    "EASActivated": "Exchange ActiveSync enabled",
+    "EASDeviceId": "Exchange ActiveSync device ID",
+    "EASActivationDateTime": "Exchange ActiveSync activation",
+    "TotalStorageGB": "Total storage (GB)",
+    "FreeStorageGB": "Free storage (GB)",
+}
+
 CHANGE_COLORS = {
     "Added": "#4fd1a5",
     "Removed": "#fb7185",
@@ -153,10 +196,16 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return AUTH_METHODS_HYBRID_PROPERTY_LABELS
     if family == USER_PROPERTIES_FAMILY:
         return USER_PROPERTIES_PROPERTY_LABELS
+    if is_android_devices_family(family):
+        return ANDROID_DEVICE_PROPERTY_LABELS
     return {}
 
 
 def property_display_text(column: str, family: str | None, *, change: str = "") -> str:
+    if is_android_devices_family(family):
+        if not column and change in {"Added", "Removed"}:
+            return "Device"
+        return ANDROID_DEVICE_PROPERTY_LABELS.get(column, column)
     if family not in USER_ORIENTED_FAMILIES:
         return column
     if not column and change in {"Added", "Removed"}:
@@ -166,7 +215,7 @@ def property_display_text(column: str, family: str | None, *, change: str = "") 
 
 def property_tooltip(column: str, family: str | None) -> str:
     labels = _family_property_labels(family)
-    if family not in USER_ORIENTED_FAMILIES or not column:
+    if (family not in USER_ORIENTED_FAMILIES and not is_android_devices_family(family)) or not column:
         return ""
     label = labels.get(column, column)
     if label == column:
@@ -176,6 +225,20 @@ def property_tooltip(column: str, family: str | None) -> str:
 
 def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
     identity = identity_display_text(detail, family)
+    if is_android_devices_family(family):
+        parts = [identity]
+        if detail.get("device_name"):
+            parts.append(f"DeviceName: {detail['device_name']}")
+        if detail.get("serial_number"):
+            parts.append(f"SerialNumber: {detail['serial_number']}")
+        if detail.get("entra_device_id"):
+            parts.append(f"EntraDeviceId: {detail['entra_device_id']}")
+        if detail.get("intune_device_id"):
+            parts.append(f"IntuneDeviceId: {detail['intune_device_id']}")
+        upn = detail.get("UserPrincipalName")
+        if upn:
+            parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
     if family in USER_ORIENTED_FAMILIES:
         parts = [identity]
         if family == USER_ACTIVITY_FAMILY and detail.get("user_id"):
@@ -224,7 +287,7 @@ def configure_comparison_detail_table(
         if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         return
-    if family in USER_ORIENTED_FAMILIES:
+    if family in USER_ORIENTED_FAMILIES or is_android_devices_family(family):
         table.setWordWrap(False)
         table.setItemDelegateForColumn(1, None)
         table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
