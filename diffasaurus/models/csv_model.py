@@ -57,6 +57,10 @@ class CsvTableModel(QAbstractTableModel):
     def headers(self) -> tuple[str, ...]:
         return tuple(self._headers)
 
+    @property
+    def delimiter(self) -> str:
+        return self._delimiter
+
     def row_values(self, row: int) -> list[str]:
         return self._rows[row] if 0 <= row < len(self._rows) else []
 
