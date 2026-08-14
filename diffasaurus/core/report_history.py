@@ -54,6 +54,7 @@ FAMILY_PREFERRED_KEYS: dict[str, tuple[str, ...]] = {
     "Entra_Users_Properties": ("Id", "UPN"),
     "Intune_Android_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
     "Intune_iOS_Devices": ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"),
+    "Intune_Devices_Autopilot": ("AutopilotObjectId", "SerialNumber"),
 }
 
 FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
@@ -69,6 +70,13 @@ FAMILY_IDENTITY_DISPLAY: dict[str, tuple[str, ...]] = {
         "SerialNumber",
         "EntraDeviceId",
         "IntuneDeviceId",
+    ),
+    "Intune_Devices_Autopilot": (
+        "DisplayName",
+        "SerialNumber",
+        "AutopilotObjectId",
+        "AzureADDeviceId",
+        "ManagedDeviceId",
     ),
 }
 
@@ -108,6 +116,7 @@ AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
 USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
 ANDROID_DEVICES_FAMILY = "Intune_Android_Devices"
 ANDROID_DEVICES_REPORT_FAMILY = "Intune_Android_Devices_Report"
+AUTOPILOT_DEVICES_FAMILY = "Intune_Devices_Autopilot"
 
 RECENT_CHANGES_FAMILY_ALIASES: dict[str, str] = {
     ANDROID_DEVICES_REPORT_FAMILY: ANDROID_DEVICES_FAMILY,
@@ -120,12 +129,22 @@ ANDROID_DEVICES_EXCLUDED_COLUMNS = frozenset(
     }
 )
 
+AUTOPILOT_DEVICES_EXCLUDED_COLUMNS = frozenset(
+    {
+        "LastContactedDateTime",
+        "AssignedUser",
+        "AssignmentStatus",
+        "RecommendedAction",
+    }
+)
+
 FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     AUTH_METHODS_HYBRID_FAMILY: frozenset({"LastUpdatedDateTime"}),
     USER_PROPERTIES_FAMILY: frozenset(
         {"ManagerStatus", "ManagerError", "SponsorsStatus", "SponsorsError"}
     ),
     ANDROID_DEVICES_FAMILY: ANDROID_DEVICES_EXCLUDED_COLUMNS,
+    AUTOPILOT_DEVICES_FAMILY: AUTOPILOT_DEVICES_EXCLUDED_COLUMNS,
 }
 
 AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
@@ -162,6 +181,10 @@ def canonical_comparison_family(family: str | None) -> str | None:
 
 def is_android_devices_family(family: str | None) -> bool:
     return canonical_comparison_family(family) == ANDROID_DEVICES_FAMILY
+
+
+def is_autopilot_devices_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == AUTOPILOT_DEVICES_FAMILY
 
 
 def _comparison_excluded_columns(family: str | None) -> frozenset[str]:
@@ -580,6 +603,12 @@ def _comparison_row_key(
             if value:
                 return value
         return ""
+    if is_autopilot_devices_family(family):
+        for column in ("AutopilotObjectId", "SerialNumber"):
+            value = str(row.get(column, "") or "").strip()
+            if value:
+                return value
+        return ""
     if use_composite:
         parts = [str(row.get(column, "") or "").strip() for column in key_columns]
         return COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
@@ -808,6 +837,32 @@ def _android_device_identity_label(
     return key
 
 
+def _autopilot_device_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+    serial = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+    if display_name and serial:
+        return f"{display_name} · {serial}"
+    if serial:
+        return serial
+    if display_name:
+        return display_name
+    autopilot_id = _pick_identity_label(primary_row, fallback_row, ("AutopilotObjectId",))
+    if autopilot_id:
+        return autopilot_id
+    return key
+
+
 def _user_activity_identity_label(
     key: str,
     change: str,
@@ -974,6 +1029,56 @@ def _attach_detail_identity(
         if user_principal_name:
             detail["UserPrincipalName"] = user_principal_name
         return
+    if is_autopilot_devices_family(family):
+        detail["identity"] = _autopilot_device_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+        if display_name:
+            detail["display_name"] = display_name
+        serial_number = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+        if serial_number:
+            detail["serial_number"] = serial_number
+        autopilot_object_id = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("AutopilotObjectId",),
+        )
+        if autopilot_object_id:
+            detail["autopilot_object_id"] = autopilot_object_id
+        azure_ad_device_id = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("AzureADDeviceId",),
+        )
+        if azure_ad_device_id:
+            detail["azure_ad_device_id"] = azure_ad_device_id
+        managed_device_id = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("ManagedDeviceId",),
+        )
+        if managed_device_id:
+            detail["managed_device_id"] = managed_device_id
+        user_principal_name = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("UserPrincipalName",),
+        )
+        if user_principal_name:
+            detail["UserPrincipalName"] = user_principal_name
+        return
     identity_columns = FAMILY_IDENTITY_DISPLAY.get(canonical_comparison_family(family) or family or "", ())
     if identity_columns:
         before_row = before_map.get(key, {})
@@ -1070,6 +1175,8 @@ def _compare_snapshots(
     skip_columns = set(key_columns)
     if is_android_devices_family(family):
         skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber"))
+    if is_autopilot_devices_family(family):
+        skip_columns.update(("AutopilotObjectId", "SerialNumber"))
     excluded_columns = _comparison_excluded_columns(family)
 
     if include_details:

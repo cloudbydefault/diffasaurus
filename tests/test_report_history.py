@@ -3250,6 +3250,489 @@ class IntuneAndroidDevicesPresentationTests(unittest.TestCase):
         self.assertEqual(comparison_summary_unit(self.REPORT_FAMILY), "devices")
 
 
+AUTOPILOT_OBJECT_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+AUTOPILOT_OBJECT_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+AUTOPILOT_AAD_ONE = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+AUTOPILOT_AAD_TWO = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+AUTOPILOT_MANAGED_ONE = "11111111-1111-1111-1111-111111111111"
+
+AUTOPILOT_HEADERS = (
+    "DisplayName",
+    "SerialNumber",
+    "Manufacturer",
+    "Model",
+    "GroupTag",
+    "PurchaseOrderIdentifier",
+    "EnrollmentState",
+    "LastContactedDateTime",
+    "UserPrincipalName",
+    "AddressableUserName",
+    "ResourceName",
+    "SkuNumber",
+    "SystemFamily",
+    "AzureADDeviceId",
+    "ManagedDeviceId",
+    "AutopilotObjectId",
+    "AssignedUser",
+    "AssignmentStatus",
+    "RecommendedAction",
+)
+
+
+def autopilot_device_row(
+    *,
+    autopilot_id: str = AUTOPILOT_OBJECT_ONE,
+    serial: str = "SN-AUTO-1",
+    display_name: str = "Surface-Laptop",
+    manufacturer: str = "Microsoft",
+    model: str = "Surface Laptop 5",
+    group_tag: str = "Finance",
+    enrollment_state: str = "notContacted",
+    last_contacted: str = "2026-08-01T00:00:00Z",
+    user_principal_name: str = "",
+    addressable_user_name: str = "",
+    resource_name: str = "OEM-RESOURCE-1",
+    azure_ad_device_id: str = "",
+    managed_device_id: str = "",
+    **extra,
+) -> dict[str, str]:
+    if user_principal_name:
+        assigned_user = user_principal_name
+    elif addressable_user_name:
+        assigned_user = addressable_user_name
+    else:
+        assigned_user = "Unassigned"
+    assignment_status = "Assigned" if assigned_user != "Unassigned" else "NotAssigned"
+    if assignment_status == "Assigned":
+        recommended_action = "Review" if enrollment_state == "enrolled" else "ReadyToUnassign"
+    else:
+        recommended_action = "ReadyToAssign"
+    row = {
+        "DisplayName": display_name,
+        "SerialNumber": serial,
+        "Manufacturer": manufacturer,
+        "Model": model,
+        "GroupTag": group_tag,
+        "PurchaseOrderIdentifier": "PO-1001",
+        "EnrollmentState": enrollment_state,
+        "LastContactedDateTime": last_contacted,
+        "UserPrincipalName": user_principal_name,
+        "AddressableUserName": addressable_user_name,
+        "ResourceName": resource_name,
+        "SkuNumber": "SKU-1",
+        "SystemFamily": "Windows",
+        "AzureADDeviceId": azure_ad_device_id,
+        "ManagedDeviceId": managed_device_id,
+        "AutopilotObjectId": autopilot_id,
+        "AssignedUser": assigned_user,
+        "AssignmentStatus": assignment_status,
+        "RecommendedAction": recommended_action,
+    }
+    row.update(extra)
+    return row
+
+
+class IntuneAutopilotDevicesComparisonTests(unittest.TestCase):
+    FAMILY = "Intune_Devices_Autopilot"
+
+    def _write_pair(self, root: Path, baseline_rows, latest_rows):
+        template = autopilot_device_row()
+        for path, rows in (
+            (root / f"{self.FAMILY}_20260731-042100.csv", baseline_rows),
+            (root / f"{self.FAMILY}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[self.FAMILY]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest):
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, self.FAMILY),
+            self.FAMILY,
+        )
+
+    def test_autopilot_object_id_preferred_over_azure_ad_device_id(self):
+        headers = list(AUTOPILOT_HEADERS)
+        self.assertEqual(suggested_key(headers, self.FAMILY), "AutopilotObjectId")
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    autopilot_device_row(
+                        autopilot_id=AUTOPILOT_OBJECT_ONE,
+                        azure_ad_device_id=AUTOPILOT_AAD_ONE,
+                    ),
+                ],
+                [
+                    autopilot_device_row(
+                        autopilot_id=AUTOPILOT_OBJECT_ONE,
+                        azure_ad_device_id=AUTOPILOT_AAD_TWO,
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "AzureADDeviceId")
+
+    def test_serial_number_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    autopilot_device_row(
+                        autopilot_id="",
+                        serial="SN-LEGACY-1",
+                        group_tag="Finance",
+                    ),
+                ],
+                [
+                    autopilot_device_row(
+                        autopilot_id="",
+                        serial="SN-LEGACY-1",
+                        group_tag="Engineering",
+                    ),
+                ],
+            )
+            self.assertEqual(suggested_key(baseline.headers, self.FAMILY), "AutopilotObjectId")
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_blank_azure_ad_device_id_does_not_collapse_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    autopilot_device_row(
+                        autopilot_id=AUTOPILOT_OBJECT_ONE,
+                        azure_ad_device_id="",
+                        group_tag="Finance",
+                    ),
+                ],
+                [
+                    autopilot_device_row(
+                        autopilot_id=AUTOPILOT_OBJECT_ONE,
+                        azure_ad_device_id="",
+                        group_tag="Engineering",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(detail_identity(changed), "Surface-Laptop · SN-AUTO-1")
+
+    def test_display_name_rename_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(display_name="Old Surface Name")],
+                [autopilot_device_row(display_name="New Surface Name")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "DisplayName")
+            self.assertEqual(detail_identity(changed), "New Surface Name · SN-AUTO-1")
+
+    def test_user_principal_name_assignment_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(user_principal_name="")],
+                [autopilot_device_row(user_principal_name="ada@example.com")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"UserPrincipalName"})
+            self.assertNotIn("AssignedUser", columns)
+            self.assertNotIn("AssignmentStatus", columns)
+            self.assertNotIn("RecommendedAction", columns)
+
+    def test_addressable_user_name_assignment_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(addressable_user_name="")],
+                [autopilot_device_row(addressable_user_name="corp\\ada")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"AddressableUserName"})
+
+    def test_friendly_added_and_removed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(autopilot_id=AUTOPILOT_OBJECT_ONE, display_name="Removed Surface", serial="SN-REMOVE")],
+                [autopilot_device_row(autopilot_id=AUTOPILOT_OBJECT_TWO, display_name="Added Surface", serial="SN-ADD")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Added Surface · SN-ADD")
+            self.assertEqual(detail_identity(removed), "Removed Surface · SN-REMOVE")
+
+    def test_last_contacted_date_time_only_movement_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(last_contacted="2026-08-01T00:00:00Z")],
+                [autopilot_device_row(last_contacted="2026-08-04T12:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_last_contacted_plus_group_tag_reports_group_tag_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(last_contacted="2026-08-01T00:00:00Z", group_tag="Finance")],
+                [autopilot_device_row(last_contacted="2026-08-04T12:00:00Z", group_tag="Engineering")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"GroupTag"})
+
+    def test_enrollment_state_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(enrollment_state="notContacted")],
+                [autopilot_device_row(enrollment_state="enrolled")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "EnrollmentState")
+            self.assertEqual(changed["before"], "notContacted")
+            self.assertEqual(changed["after"], "enrolled")
+
+    def test_resource_name_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(resource_name="OEM-RESOURCE-1")],
+                [autopilot_device_row(resource_name="OEM-RESOURCE-2")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "ResourceName")
+            self.assertEqual(changed["before"], "OEM-RESOURCE-1")
+            self.assertEqual(changed["after"], "OEM-RESOURCE-2")
+
+    def test_assignment_derived_fields_do_not_duplicate_source_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(user_principal_name="", enrollment_state="notContacted")],
+                [autopilot_device_row(user_principal_name="ada@example.com", enrollment_state="notContacted")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"UserPrincipalName"})
+
+    def test_recommended_action_excluded_when_enrollment_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [autopilot_device_row(user_principal_name="ada@example.com", enrollment_state="notContacted")],
+                [autopilot_device_row(user_principal_name="ada@example.com", enrollment_state="enrolled")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertEqual(columns, {"EnrollmentState"})
+            self.assertNotIn("RecommendedAction", columns)
+
+    def test_collection_time_last_contacted_does_not_flood_changed_devices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = []
+            latest_rows = []
+            for index in range(45):
+                autopilot_id = f"{index:08x}-0000-0000-0000-000000000001"
+                baseline_rows.append(
+                    autopilot_device_row(
+                        autopilot_id=autopilot_id,
+                        serial=f"SN-{index}",
+                        display_name=f"Device-{index}",
+                        last_contacted="2026-08-01T00:00:00Z",
+                    )
+                )
+                latest_rows.append(
+                    autopilot_device_row(
+                        autopilot_id=autopilot_id,
+                        serial=f"SN-{index}",
+                        display_name=f"Device-{index}",
+                        last_contacted=f"2026-08-0{index % 4 + 1}T12:00:00Z",
+                    )
+                )
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 0))
+
+    def test_android_last_sync_exclusion_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = android_device_row(last_sync="2026-08-01T00:00:00Z")
+            for stamp, last_sync in (
+                ("20260731-042100", "2026-08-01T00:00:00Z"),
+                ("20260804-042100", "2026-08-04T12:00:00Z"),
+            ):
+                updated = dict(row)
+                updated["LastSyncDateTime"] = last_sync
+                write_report(root / f"Intune_Android_Devices_{stamp}.csv", [updated])
+            snapshots = scan_report_history(root)["Intune_Android_Devices"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                suggested_key(snapshots[0].headers, "Intune_Android_Devices"),
+                "Intune_Android_Devices",
+            )
+            self.assertEqual(result.total_changes, 0)
+
+    def test_ios_last_sync_remains_comparable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = android_device_row(last_sync="2026-08-01T00:00:00Z")
+            for stamp, last_sync in (
+                ("20260731-042100", "2026-08-01T00:00:00Z"),
+                ("20260804-042100", "2026-08-04T12:00:00Z"),
+            ):
+                updated = dict(row)
+                updated["LastSyncDateTime"] = last_sync
+                write_report(root / f"Intune_iOS_Devices_{stamp}.csv", [updated])
+            snapshots = scan_report_history(root)["Intune_iOS_Devices"]
+            result = compare_snapshots(
+                snapshots[0],
+                snapshots[1],
+                suggested_key(snapshots[0].headers, "Intune_iOS_Devices"),
+                "Intune_iOS_Devices",
+            )
+            self.assertEqual(result.changed, 1)
+
+    def test_generic_family_key_behavior_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Entra_Users_Properties_20260731-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "R&D"}],
+            )
+            write_report(
+                root / "Entra_Users_Properties_20260804-042100.csv",
+                [{"UPN": "ada@example.com", "Department": "Engineering"}],
+            )
+            snapshots = scan_report_history(root)["Entra_Users_Properties"]
+            self.assertEqual(suggested_key(snapshots[0].headers), "UPN")
+
+
+class IntuneAutopilotDevicesPresentationTests(unittest.TestCase):
+    FAMILY = "Intune_Devices_Autopilot"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("GroupTag", self.FAMILY), "Group tag")
+        self.assertEqual(property_display_text("EnrollmentState", self.FAMILY), "Enrollment state")
+        self.assertEqual(property_display_text("UserPrincipalName", self.FAMILY), "User principal name")
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Device")
+        tooltip = property_tooltip("RecommendedAction", self.FAMILY)
+        self.assertIn("Recommended action", tooltip)
+        self.assertIn("CSV field: RecommendedAction", tooltip)
+
+    def test_identity_tooltip_includes_autopilot_fields(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "Surface-Laptop · SN-AUTO-1",
+            "display_name": "Surface-Laptop",
+            "serial_number": "SN-AUTO-1",
+            "autopilot_object_id": AUTOPILOT_OBJECT_ONE,
+            "azure_ad_device_id": AUTOPILOT_AAD_ONE,
+            "managed_device_id": AUTOPILOT_MANAGED_ONE,
+            "UserPrincipalName": "ada@example.com",
+            "key": AUTOPILOT_OBJECT_ONE,
+        }
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("Surface-Laptop · SN-AUTO-1", tooltip)
+        self.assertIn("AutopilotObjectId:", tooltip)
+        self.assertIn("AzureADDeviceId:", tooltip)
+        self.assertIn("ManagedDeviceId:", tooltip)
+        self.assertIn("UserPrincipalName:", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": AUTOPILOT_OBJECT_ONE,
+                    "identity": "Surface-Laptop · SN-AUTO-1",
+                    "column": "GroupTag",
+                    "before": "Finance",
+                    "after": "Engineering",
+                    "display_name": "Surface-Laptop",
+                    "serial_number": "SN-AUTO-1",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "Surface-Laptop · SN-AUTO-1")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Group tag")
+
+    def test_recent_changes_summary_uses_device_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="AutopilotObjectId",
+            summary=ComparisonSummary(added=1, removed=1, changed=3, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "1 device added · 1 device removed · 3 devices changed",
+        )
+
+    def test_comparison_summary_unit_uses_devices(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
+
+
 class EntraGroupMembershipComparisonTests(unittest.TestCase):
     FAMILY = "Entra_Group_User_Memberships"
 

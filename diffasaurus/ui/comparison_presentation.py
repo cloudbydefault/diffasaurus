@@ -10,7 +10,11 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from diffasaurus.core.report_history import detail_identity, is_android_devices_family
+from diffasaurus.core.report_history import (
+    detail_identity,
+    is_android_devices_family,
+    is_autopilot_devices_family,
+)
 
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
 USER_ACTIVITY_FAMILY = "Entra_Users_Activity"
@@ -160,6 +164,28 @@ ANDROID_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "FreeStorageGB": "Free storage (GB)",
 }
 
+AUTOPILOT_DEVICE_PROPERTY_LABELS: dict[str, str] = {
+    "DisplayName": "Display name",
+    "SerialNumber": "Serial number",
+    "Manufacturer": "Manufacturer",
+    "Model": "Model",
+    "GroupTag": "Group tag",
+    "PurchaseOrderIdentifier": "Purchase order identifier",
+    "EnrollmentState": "Enrollment state",
+    "LastContactedDateTime": "Last contacted",
+    "UserPrincipalName": "User principal name",
+    "AddressableUserName": "Addressable user name",
+    "ResourceName": "Resource name",
+    "SkuNumber": "SKU number",
+    "SystemFamily": "System family",
+    "AzureADDeviceId": "Entra device ID",
+    "ManagedDeviceId": "Managed device ID",
+    "AutopilotObjectId": "Autopilot object ID",
+    "AssignedUser": "Assigned user",
+    "AssignmentStatus": "Assignment status",
+    "RecommendedAction": "Recommended action",
+}
+
 CHANGE_COLORS = {
     "Added": "#4fd1a5",
     "Removed": "#fb7185",
@@ -198,14 +224,21 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return USER_PROPERTIES_PROPERTY_LABELS
     if is_android_devices_family(family):
         return ANDROID_DEVICE_PROPERTY_LABELS
+    if is_autopilot_devices_family(family):
+        return AUTOPILOT_DEVICE_PROPERTY_LABELS
     return {}
 
 
+def _is_device_identity_family(family: str | None) -> bool:
+    return is_android_devices_family(family) or is_autopilot_devices_family(family)
+
+
 def property_display_text(column: str, family: str | None, *, change: str = "") -> str:
-    if is_android_devices_family(family):
+    if _is_device_identity_family(family):
         if not column and change in {"Added", "Removed"}:
             return "Device"
-        return ANDROID_DEVICE_PROPERTY_LABELS.get(column, column)
+        labels = _family_property_labels(family)
+        return labels.get(column, column)
     if family not in USER_ORIENTED_FAMILIES:
         return column
     if not column and change in {"Added", "Removed"}:
@@ -215,7 +248,7 @@ def property_display_text(column: str, family: str | None, *, change: str = "") 
 
 def property_tooltip(column: str, family: str | None) -> str:
     labels = _family_property_labels(family)
-    if (family not in USER_ORIENTED_FAMILIES and not is_android_devices_family(family)) or not column:
+    if (family not in USER_ORIENTED_FAMILIES and not _is_device_identity_family(family)) or not column:
         return ""
     label = labels.get(column, column)
     if label == column:
@@ -235,6 +268,22 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
             parts.append(f"EntraDeviceId: {detail['entra_device_id']}")
         if detail.get("intune_device_id"):
             parts.append(f"IntuneDeviceId: {detail['intune_device_id']}")
+        upn = detail.get("UserPrincipalName")
+        if upn:
+            parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
+    if is_autopilot_devices_family(family):
+        parts = [identity]
+        if detail.get("display_name"):
+            parts.append(f"DisplayName: {detail['display_name']}")
+        if detail.get("serial_number"):
+            parts.append(f"SerialNumber: {detail['serial_number']}")
+        if detail.get("autopilot_object_id"):
+            parts.append(f"AutopilotObjectId: {detail['autopilot_object_id']}")
+        if detail.get("azure_ad_device_id"):
+            parts.append(f"AzureADDeviceId: {detail['azure_ad_device_id']}")
+        if detail.get("managed_device_id"):
+            parts.append(f"ManagedDeviceId: {detail['managed_device_id']}")
         upn = detail.get("UserPrincipalName")
         if upn:
             parts.append(f"UserPrincipalName: {upn}")
@@ -287,7 +336,7 @@ def configure_comparison_detail_table(
         if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         return
-    if family in USER_ORIENTED_FAMILIES or is_android_devices_family(family):
+    if family in USER_ORIENTED_FAMILIES or _is_device_identity_family(family):
         table.setWordWrap(False)
         table.setItemDelegateForColumn(1, None)
         table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
