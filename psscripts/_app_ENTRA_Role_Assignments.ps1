@@ -140,17 +140,33 @@ Write-Host "Groups loaded: $($groupMap.Count)"
 $results = New-Object System.Collections.Generic.List[object]
 
 function AddRow {
-    param($user,$roleName,$state,$source,$group)
+    param(
+        $User,
+        [string]$RoleName,
+        [string]$RoleDefinitionId,
+        [string]$State,
+        [string]$Source,
+        [string]$Group,
+        [string]$GroupId,
+        $Schedule
+    )
 
     $results.Add([pscustomobject]@{
-        UserPrincipalName = $user.userPrincipalName
-        DisplayName       = $user.displayName
-        Mail              = $user.mail
-        AccountEnabled    = $user.accountEnabled
-        RoleName          = $roleName
-        RoleState         = $state
-        AssignmentSource  = $source
-        SourceGroup       = $group
+        UserPrincipalName    = $User.userPrincipalName
+        DisplayName          = $User.displayName
+        Mail                 = $User.mail
+        AccountEnabled       = $User.accountEnabled
+        RoleName             = $RoleName
+        RoleState            = $State
+        AssignmentSource     = $Source
+        SourceGroup          = $Group
+        UserId               = $User.id
+        RoleDefinitionId     = $RoleDefinitionId
+        AssignmentScheduleId = $Schedule.id
+        SourcePrincipalId    = $Schedule.principalId
+        SourceGroupId        = $GroupId
+        DirectoryScopeId     = $Schedule.directoryScopeId
+        AppScopeId           = $Schedule.appScopeId
     })
 }
 
@@ -162,14 +178,14 @@ Write-Host "Processing direct roles..."
 foreach($s in $activeSchedules) {
     if($userMap.ContainsKey($s.principalId)) {
         $user = $userMap[$s.principalId]
-        AddRow $user $roleMap[$s.roleDefinitionId] "Active" "Direct" ""
+        AddRow -User $user -RoleName $roleMap[$s.roleDefinitionId] -RoleDefinitionId $s.roleDefinitionId -State "Active" -Source "Direct" -Group "" -GroupId "" -Schedule $s
     }
 }
 
 foreach($s in $eligibleSchedules) {
     if($userMap.ContainsKey($s.principalId)) {
         $user = $userMap[$s.principalId]
-        AddRow $user $roleMap[$s.roleDefinitionId] "Eligible" "Direct" ""
+        AddRow -User $user -RoleName $roleMap[$s.roleDefinitionId] -RoleDefinitionId $s.roleDefinitionId -State "Eligible" -Source "Direct" -Group "" -GroupId "" -Schedule $s
     }
 }
 
@@ -185,7 +201,7 @@ foreach($s in $activeSchedules) {
         $members = Invoke-GraphGetAll "/v1.0/groups/$($group.id)/members/microsoft.graph.user?`$select=id,displayName,userPrincipalName,mail,accountEnabled"
 
         foreach($m in $members) {
-            AddRow $m $roleMap[$s.roleDefinitionId] "Active" "Group" $group.displayName
+            AddRow -User $m -RoleName $roleMap[$s.roleDefinitionId] -RoleDefinitionId $s.roleDefinitionId -State "Active" -Source "Group" -Group $group.displayName -GroupId $group.id -Schedule $s
         }
     }
 }
@@ -197,7 +213,7 @@ foreach($s in $eligibleSchedules) {
         $members = Invoke-GraphGetAll "/v1.0/groups/$($group.id)/members/microsoft.graph.user?`$select=id,displayName,userPrincipalName,mail,accountEnabled"
 
         foreach($m in $members) {
-            AddRow $m $roleMap[$s.roleDefinitionId] "Eligible" "Group" $group.displayName
+            AddRow -User $m -RoleName $roleMap[$s.roleDefinitionId] -RoleDefinitionId $s.roleDefinitionId -State "Eligible" -Source "Group" -Group $group.displayName -GroupId $group.id -Schedule $s
         }
     }
 }

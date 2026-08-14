@@ -14,12 +14,14 @@ from diffasaurus.core.report_history import (
     detail_identity,
     is_android_devices_family,
     is_autopilot_devices_family,
+    is_role_assignments_family,
 )
 
 MEMBERSHIP_FAMILY = "Entra_Group_User_Memberships"
 USER_ACTIVITY_FAMILY = "Entra_Users_Activity"
 AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
 USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
+ROLE_ASSIGNMENTS_FAMILY = "Entra_Role_Assignments"
 USER_ORIENTED_FAMILIES = frozenset(
     {
         USER_ACTIVITY_FAMILY,
@@ -29,6 +31,8 @@ USER_ORIENTED_FAMILIES = frozenset(
 )
 MEMBERSHIP_IDENTITY_MIN_WIDTH = 300
 USER_ORIENTED_PROPERTY_MIN_WIDTH = 240
+ROLE_ASSIGNMENT_IDENTITY_MIN_WIDTH = 380
+ROLE_ASSIGNMENT_PATH_MIN_WIDTH = 220
 MEMBERSHIP_ROW_MIN_HEIGHT = 48
 IDENTITY_ARROW = " → "
 IDENTITY_SEPARATOR = " · "
@@ -186,6 +190,24 @@ AUTOPILOT_DEVICE_PROPERTY_LABELS: dict[str, str] = {
     "RecommendedAction": "Recommended action",
 }
 
+ROLE_ASSIGNMENT_PROPERTY_LABELS: dict[str, str] = {
+    "UserPrincipalName": "User principal name",
+    "DisplayName": "Display name",
+    "Mail": "Mail",
+    "AccountEnabled": "Account enabled",
+    "RoleName": "Role",
+    "RoleState": "Role state",
+    "AssignmentSource": "Assignment source",
+    "SourceGroup": "Source group",
+    "UserId": "User ID",
+    "RoleDefinitionId": "Role definition ID",
+    "AssignmentScheduleId": "Assignment schedule ID",
+    "SourcePrincipalId": "Source principal ID",
+    "SourceGroupId": "Source group ID",
+    "DirectoryScopeId": "Directory scope",
+    "AppScopeId": "App scope",
+}
+
 CHANGE_COLORS = {
     "Added": "#4fd1a5",
     "Removed": "#fb7185",
@@ -226,6 +248,8 @@ def _family_property_labels(family: str | None) -> dict[str, str]:
         return ANDROID_DEVICE_PROPERTY_LABELS
     if is_autopilot_devices_family(family):
         return AUTOPILOT_DEVICE_PROPERTY_LABELS
+    if is_role_assignments_family(family):
+        return ROLE_ASSIGNMENT_PROPERTY_LABELS
     return {}
 
 
@@ -233,7 +257,17 @@ def _is_device_identity_family(family: str | None) -> bool:
     return is_android_devices_family(family) or is_autopilot_devices_family(family)
 
 
+def _is_semantic_detail_family(family: str | None) -> bool:
+    return family in USER_ORIENTED_FAMILIES or _is_device_identity_family(
+        family
+    ) or is_role_assignments_family(family)
+
+
 def property_display_text(column: str, family: str | None, *, change: str = "") -> str:
+    if is_role_assignments_family(family):
+        if not column and change in {"Added", "Removed"}:
+            return "Role assignment"
+        return ROLE_ASSIGNMENT_PROPERTY_LABELS.get(column, column)
     if _is_device_identity_family(family):
         if not column and change in {"Added", "Removed"}:
             return "Device"
@@ -248,7 +282,7 @@ def property_display_text(column: str, family: str | None, *, change: str = "") 
 
 def property_tooltip(column: str, family: str | None) -> str:
     labels = _family_property_labels(family)
-    if (family not in USER_ORIENTED_FAMILIES and not _is_device_identity_family(family)) or not column:
+    if not _is_semantic_detail_family(family) or not column:
         return ""
     label = labels.get(column, column)
     if label == column:
@@ -287,6 +321,35 @@ def identity_tooltip(detail: dict[str, str], family: str | None = None) -> str:
         upn = detail.get("UserPrincipalName")
         if upn:
             parts.append(f"UserPrincipalName: {upn}")
+        return "\n".join(parts)
+    if is_role_assignments_family(family):
+        parts = [identity]
+        if detail.get("display_name"):
+            parts.append(f"DisplayName: {detail['display_name']}")
+        if detail.get("UPN"):
+            parts.append(f"UserPrincipalName: {detail['UPN']}")
+        if detail.get("user_id"):
+            parts.append(f"UserId: {detail['user_id']}")
+        if detail.get("role_name"):
+            parts.append(f"RoleName: {detail['role_name']}")
+        if detail.get("role_definition_id"):
+            parts.append(f"RoleDefinitionId: {detail['role_definition_id']}")
+        if detail.get("role_state"):
+            parts.append(f"RoleState: {detail['role_state']}")
+        if detail.get("assignment_source"):
+            parts.append(f"AssignmentSource: {detail['assignment_source']}")
+        if detail.get("source_group"):
+            parts.append(f"SourceGroup: {detail['source_group']}")
+        if detail.get("assignment_schedule_id"):
+            parts.append(f"AssignmentScheduleId: {detail['assignment_schedule_id']}")
+        if detail.get("source_principal_id"):
+            parts.append(f"SourcePrincipalId: {detail['source_principal_id']}")
+        if detail.get("source_group_id"):
+            parts.append(f"SourceGroupId: {detail['source_group_id']}")
+        if detail.get("directory_scope_id"):
+            parts.append(f"DirectoryScopeId: {detail['directory_scope_id']}")
+        if detail.get("app_scope_id"):
+            parts.append(f"AppScopeId: {detail['app_scope_id']}")
         return "\n".join(parts)
     if family in USER_ORIENTED_FAMILIES:
         parts = [identity]
@@ -336,7 +399,7 @@ def configure_comparison_detail_table(
         if table.columnWidth(1) < MEMBERSHIP_IDENTITY_MIN_WIDTH:
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         return
-    if family in USER_ORIENTED_FAMILIES or _is_device_identity_family(family):
+    if _is_semantic_detail_family(family):
         table.setWordWrap(False)
         table.setItemDelegateForColumn(1, None)
         table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -350,6 +413,13 @@ def configure_comparison_detail_table(
             table.setColumnWidth(1, MEMBERSHIP_IDENTITY_MIN_WIDTH)
         if table.columnWidth(2) < USER_ORIENTED_PROPERTY_MIN_WIDTH:
             table.setColumnWidth(2, USER_ORIENTED_PROPERTY_MIN_WIDTH)
+        if is_role_assignments_family(family):
+            if table.columnWidth(1) < ROLE_ASSIGNMENT_IDENTITY_MIN_WIDTH:
+                table.setColumnWidth(1, ROLE_ASSIGNMENT_IDENTITY_MIN_WIDTH)
+            if table.columnWidth(3) < ROLE_ASSIGNMENT_PATH_MIN_WIDTH:
+                table.setColumnWidth(3, ROLE_ASSIGNMENT_PATH_MIN_WIDTH)
+            if table.columnWidth(4) < ROLE_ASSIGNMENT_PATH_MIN_WIDTH:
+                table.setColumnWidth(4, ROLE_ASSIGNMENT_PATH_MIN_WIDTH)
         return
     table.setWordWrap(False)
     table.setItemDelegateForColumn(1, None)

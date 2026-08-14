@@ -257,6 +257,15 @@ class FamilyChangeSection(QFrame):
                     f"{removed:,} device{'s' if removed != 1 else ''} removed · "
                     f"{changed:,} device{'s' if changed != 1 else ''} changed"
                 )
+            elif item.family == "Entra_Role_Assignments":
+                added = item.summary.added
+                removed = item.summary.removed
+                changed = item.summary.changed
+                self.counts_label.setText(
+                    f"{added:,} assignment{'s' if added != 1 else ''} added · "
+                    f"{removed:,} assignment{'s' if removed != 1 else ''} removed · "
+                    f"{changed:,} assignment{'s' if changed != 1 else ''} changed"
+                )
             else:
                 self.counts_label.setText(
                     f"{item.summary.added} added · {item.summary.removed} removed · "
@@ -388,6 +397,7 @@ class FamilyChangeSection(QFrame):
                     "Intune_Android_Devices",
                     "Intune_Android_Devices_Report",
                     "Intune_Devices_Autopilot",
+                    "Entra_Role_Assignments",
                 }:
                     matching.append(detail)
                 else:

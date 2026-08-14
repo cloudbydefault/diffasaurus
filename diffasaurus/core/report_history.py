@@ -117,6 +117,17 @@ USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
 ANDROID_DEVICES_FAMILY = "Intune_Android_Devices"
 ANDROID_DEVICES_REPORT_FAMILY = "Intune_Android_Devices_Report"
 AUTOPILOT_DEVICES_FAMILY = "Intune_Devices_Autopilot"
+ROLE_ASSIGNMENTS_FAMILY = "Entra_Role_Assignments"
+ROLE_ASSIGNMENT_STABLE_KEY_COLUMNS = ("AssignmentScheduleId", "UserId")
+ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS = (
+    "UserPrincipalName",
+    "RoleName",
+    "RoleState",
+    "AssignmentSource",
+    "SourceGroup",
+)
+ROLE_ASSIGNMENT_STABLE_KEY_LABEL = "Assignment schedule + User"
+ROLE_ASSIGNMENT_LEGACY_KEY_LABEL = "Role assignment (legacy)"
 
 RECENT_CHANGES_FAMILY_ALIASES: dict[str, str] = {
     ANDROID_DEVICES_REPORT_FAMILY: ANDROID_DEVICES_FAMILY,
@@ -138,6 +149,17 @@ AUTOPILOT_DEVICES_EXCLUDED_COLUMNS = frozenset(
     }
 )
 
+ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS = frozenset(
+    {
+        "DisplayName",
+        "UserPrincipalName",
+        "Mail",
+        "AccountEnabled",
+        "RoleName",
+        "SourceGroup",
+    }
+)
+
 FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     AUTH_METHODS_HYBRID_FAMILY: frozenset({"LastUpdatedDateTime"}),
     USER_PROPERTIES_FAMILY: frozenset(
@@ -145,6 +167,7 @@ FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
     ),
     ANDROID_DEVICES_FAMILY: ANDROID_DEVICES_EXCLUDED_COLUMNS,
     AUTOPILOT_DEVICES_FAMILY: AUTOPILOT_DEVICES_EXCLUDED_COLUMNS,
+    ROLE_ASSIGNMENTS_FAMILY: ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS,
 }
 
 AUTH_METHODS_HYBRID_COLLECTION_COLUMNS = frozenset(
@@ -185,6 +208,39 @@ def is_android_devices_family(family: str | None) -> bool:
 
 def is_autopilot_devices_family(family: str | None) -> bool:
     return canonical_comparison_family(family) == AUTOPILOT_DEVICES_FAMILY
+
+
+def is_role_assignments_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == ROLE_ASSIGNMENTS_FAMILY
+
+
+def _role_assignment_stable_key_available(
+    headers: list[str] | tuple[str, ...],
+) -> bool:
+    normalized = {header.lower(): header for header in headers}
+    return (
+        "assignmentscheduleid" in normalized
+        and "userid" in normalized
+    )
+
+
+def role_assignment_key_columns_for_comparison(
+    baseline_headers: list[str] | tuple[str, ...],
+    latest_headers: list[str] | tuple[str, ...],
+) -> tuple[str, ...]:
+    if _role_assignment_stable_key_available(
+        baseline_headers
+    ) and _role_assignment_stable_key_available(latest_headers):
+        return ROLE_ASSIGNMENT_STABLE_KEY_COLUMNS
+    return ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS
+
+
+def role_assignment_suggested_key_label(
+    headers: list[str] | tuple[str, ...],
+) -> str:
+    if _role_assignment_stable_key_available(headers):
+        return ROLE_ASSIGNMENT_STABLE_KEY_LABEL
+    return ROLE_ASSIGNMENT_LEGACY_KEY_LABEL
 
 
 def _comparison_excluded_columns(family: str | None) -> frozenset[str]:
@@ -517,6 +573,8 @@ def suggested_key(
     headers: list[str] | tuple[str, ...],
     family: str | None = None,
 ) -> str:
+    if is_role_assignments_family(family):
+        return role_assignment_suggested_key_label(headers)
     composite_label = composite_key_label(family, headers)
     if composite_label:
         return composite_label
@@ -609,6 +667,15 @@ def _comparison_row_key(
             if value:
                 return value
         return ""
+    if is_role_assignments_family(family):
+        parts = [str(row.get(column, "") or "").strip() for column in key_columns]
+        if key_columns == ROLE_ASSIGNMENT_LEGACY_KEY_COLUMNS:
+            if not all(parts[:-1]):
+                return ""
+            return COMPOSITE_KEY_DELIMITER.join(parts)
+        if all(parts):
+            return COMPOSITE_KEY_DELIMITER.join(parts)
+        return ""
     if use_composite:
         parts = [str(row.get(column, "") or "").strip() for column in key_columns]
         return COMPOSITE_KEY_DELIMITER.join(parts) if all(parts) else ""
@@ -636,6 +703,8 @@ def detail_identity(detail: dict[str, str]) -> str:
 def comparison_summary_unit(family: str | None) -> str:
     if family == "Entra_Group_User_Memberships":
         return "memberships"
+    if is_role_assignments_family(family):
+        return "assignments"
     if family in {
         "Entra_Users_Activity",
         AUTH_METHODS_HYBRID_FAMILY,
@@ -863,6 +932,49 @@ def _autopilot_device_identity_label(
     return key
 
 
+def _role_assignment_path_label(row: dict[str, str]) -> str:
+    role_state = str(row.get("RoleState", "") or "").strip()
+    assignment_source = str(row.get("AssignmentSource", "") or "").strip()
+    source_group = str(row.get("SourceGroup", "") or "").strip()
+    if assignment_source == "Group" and source_group:
+        return f"{role_state} · via {source_group}"
+    if assignment_source:
+        return f"{role_state} · {assignment_source}"
+    return role_state
+
+
+def _role_assignment_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    display_name = _pick_identity_label(primary_row, fallback_row, ("DisplayName",))
+    upn = _pick_identity_label(primary_row, fallback_row, ("UserPrincipalName",))
+    user_id = _pick_identity_label(primary_row, fallback_row, ("UserId",))
+    role_name = _pick_identity_label(primary_row, fallback_row, ("RoleName",))
+    role_definition_id = _pick_identity_label(
+        primary_row,
+        fallback_row,
+        ("RoleDefinitionId",),
+    )
+    user_part = display_name or upn or user_id
+    role_part = role_name or role_definition_id
+    if user_part and role_part:
+        return f"{user_part} → {role_part}"
+    if user_part:
+        return user_part
+    if role_part:
+        return role_part
+    return key.split(COMPOSITE_KEY_DELIMITER, 1)[0]
+
+
 def _user_activity_identity_label(
     key: str,
     change: str,
@@ -1079,6 +1191,40 @@ def _attach_detail_identity(
         if user_principal_name:
             detail["UserPrincipalName"] = user_principal_name
         return
+    if is_role_assignments_family(family):
+        detail["identity"] = _role_assignment_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        for field, detail_key in (
+            ("DisplayName", "display_name"),
+            ("UserPrincipalName", "UPN"),
+            ("UserId", "user_id"),
+            ("RoleName", "role_name"),
+            ("RoleDefinitionId", "role_definition_id"),
+            ("RoleState", "role_state"),
+            ("AssignmentSource", "assignment_source"),
+            ("SourceGroup", "source_group"),
+            ("AssignmentScheduleId", "assignment_schedule_id"),
+            ("SourcePrincipalId", "source_principal_id"),
+            ("SourceGroupId", "source_group_id"),
+            ("DirectoryScopeId", "directory_scope_id"),
+            ("AppScopeId", "app_scope_id"),
+        ):
+            value = _pick_identity_label(primary_row, fallback_row, (field,))
+            if value:
+                detail[detail_key] = value
+        return
     identity_columns = FAMILY_IDENTITY_DISPLAY.get(canonical_comparison_family(family) or family or "", ())
     if identity_columns:
         before_row = before_map.get(key, {})
@@ -1110,13 +1256,27 @@ def _compare_snapshots(
     family: str | None = None,
 ) -> ComparisonSummary:
     common = common_headers(baseline, latest)
-    composite_columns = composite_key_columns(family, common)
-    use_composite = bool(
-        composite_columns
-        and uses_composite_key(family, common, key_column)
-    )
-    if not use_composite and (not key_column or key_column not in common):
-        raise ValueError("Choose a key column shared by both reports.")
+    if is_role_assignments_family(family):
+        key_columns = role_assignment_key_columns_for_comparison(
+            baseline.headers,
+            latest.headers,
+        )
+        use_composite = True
+        composite_columns = key_columns
+        if key_column not in {
+            ROLE_ASSIGNMENT_STABLE_KEY_LABEL,
+            ROLE_ASSIGNMENT_LEGACY_KEY_LABEL,
+        }:
+            raise ValueError("Choose a role-assignment key shared by both reports.")
+    else:
+        composite_columns = composite_key_columns(family, common)
+        use_composite = bool(
+            composite_columns
+            and uses_composite_key(family, common, key_column)
+        )
+        if not use_composite and (not key_column or key_column not in common):
+            raise ValueError("Choose a key column shared by both reports.")
+        key_columns = comparison_key_columns(family, common, key_column)
 
     comparison_cache_key = ""
     if not include_details:
@@ -1147,7 +1307,8 @@ def _compare_snapshots(
 
     _, baseline_rows = read_csv_rows(baseline.path)
     _, latest_rows = read_csv_rows(latest.path)
-    key_columns = comparison_key_columns(family, common, key_column)
+    if not is_role_assignments_family(family):
+        key_columns = comparison_key_columns(family, common, key_column)
 
     def keyed(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
         result = {}
@@ -1178,6 +1339,12 @@ def _compare_snapshots(
     if is_autopilot_devices_family(family):
         skip_columns.update(("AutopilotObjectId", "SerialNumber"))
     excluded_columns = _comparison_excluded_columns(family)
+    added_after = (
+        "New assignment" if is_role_assignments_family(family) else "New row"
+    )
+    removed_before = (
+        "Existing assignment" if is_role_assignments_family(family) else "Existing row"
+    )
 
     if include_details:
         for key in added_keys:
@@ -1186,7 +1353,7 @@ def _compare_snapshots(
                 "key": key,
                 "column": "",
                 "before": "",
-                "after": "New row",
+                "after": added_after,
             }
             _attach_detail_identity(
                 detail,
@@ -1198,13 +1365,15 @@ def _compare_snapshots(
                 composite_columns or (),
                 display_column,
             )
+            if is_role_assignments_family(family):
+                detail["after"] = _role_assignment_path_label(after_map.get(key, {}))
             details.append(detail)
         for key in removed_keys:
             detail = {
                 "change": "Removed",
                 "key": key,
                 "column": "",
-                "before": "Existing row",
+                "before": removed_before,
                 "after": "",
             }
             _attach_detail_identity(
@@ -1217,6 +1386,8 @@ def _compare_snapshots(
                 composite_columns or (),
                 display_column,
             )
+            if is_role_assignments_family(family):
+                detail["before"] = _role_assignment_path_label(before_map.get(key, {}))
             details.append(detail)
 
     changed_rows = 0
