@@ -252,11 +252,11 @@ class RunScriptsDialog(QDialog):
                 if latest is None:
                     evidence = f"⚠ Missing {expected_day:%d %b %Y}"
                 elif note:
-                    evidence = f"{note} · {latest:%d %b %Y · %H:%M}"
+                    evidence = f"{note} · {latest.captured_at:%d %b %Y · %H:%M}"
                 elif latest.captured_at.date() < expected_day:
                     evidence = f"⚠ Missing {expected_day:%d %b %Y}"
                 else:
-                    evidence = f"✓ Latest {latest:%d %b %Y · %H:%M}"
+                    evidence = f"✓ Latest {latest.captured_at:%d %b %Y · %H:%M}"
             else:
                 latest_time = latest.captured_at if latest else None
                 missing = latest_time is None or latest_time.date() < expected_day
