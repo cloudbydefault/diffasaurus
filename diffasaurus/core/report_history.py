@@ -116,6 +116,8 @@ AUTH_METHODS_HYBRID_FAMILY = "Entra_Users_AuthenticationMethods_Hybrid"
 USER_PROPERTIES_FAMILY = "Entra_Users_Properties"
 ANDROID_DEVICES_FAMILY = "Intune_Android_Devices"
 ANDROID_DEVICES_REPORT_FAMILY = "Intune_Android_Devices_Report"
+IOS_DEVICES_FAMILY = "Intune_iOS_Devices"
+IOS_DEVICES_REPORT_FAMILY = "Intune_iOS_Devices_Report"
 AUTOPILOT_DEVICES_FAMILY = "Intune_Devices_Autopilot"
 ROLE_ASSIGNMENTS_FAMILY = "Entra_Role_Assignments"
 ROLE_ASSIGNMENT_STABLE_KEY_COLUMNS = ("AssignmentScheduleId", "UserId")
@@ -131,12 +133,22 @@ ROLE_ASSIGNMENT_LEGACY_KEY_LABEL = "Role assignment (legacy)"
 
 RECENT_CHANGES_FAMILY_ALIASES: dict[str, str] = {
     ANDROID_DEVICES_REPORT_FAMILY: ANDROID_DEVICES_FAMILY,
+    IOS_DEVICES_REPORT_FAMILY: IOS_DEVICES_FAMILY,
 }
 
 ANDROID_DEVICES_EXCLUDED_COLUMNS = frozenset(
     {
         "DaysSinceLastSync",
         "LastSyncDateTime",
+    }
+)
+
+IOS_DEVICES_EXCLUDED_COLUMNS = frozenset(
+    {
+        "DaysSinceLastSync",
+        "LastSyncDateTime",
+        "FreeStorageGB",
+        "ActivationLockBypassCode",
     }
 )
 
@@ -166,6 +178,7 @@ FAMILY_COMPARISON_EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
         {"ManagerStatus", "ManagerError", "SponsorsStatus", "SponsorsError"}
     ),
     ANDROID_DEVICES_FAMILY: ANDROID_DEVICES_EXCLUDED_COLUMNS,
+    IOS_DEVICES_FAMILY: IOS_DEVICES_EXCLUDED_COLUMNS,
     AUTOPILOT_DEVICES_FAMILY: AUTOPILOT_DEVICES_EXCLUDED_COLUMNS,
     ROLE_ASSIGNMENTS_FAMILY: ROLE_ASSIGNMENTS_EXCLUDED_COLUMNS,
 }
@@ -204,6 +217,14 @@ def canonical_comparison_family(family: str | None) -> str | None:
 
 def is_android_devices_family(family: str | None) -> bool:
     return canonical_comparison_family(family) == ANDROID_DEVICES_FAMILY
+
+
+def is_ios_devices_family(family: str | None) -> bool:
+    return canonical_comparison_family(family) == IOS_DEVICES_FAMILY
+
+
+def is_inventory_device_family(family: str | None) -> bool:
+    return is_android_devices_family(family) or is_ios_devices_family(family)
 
 
 def is_autopilot_devices_family(family: str | None) -> bool:
@@ -661,6 +682,15 @@ def _comparison_row_key(
             if value:
                 return value
         return ""
+    if is_ios_devices_family(family):
+        for column in ("EntraDeviceId", "IntuneDeviceId", "SerialNumber"):
+            value = str(row.get(column, "") or "").strip()
+            if value:
+                return value
+        udid = str(row.get("UDID", "") or "").strip()
+        if udid:
+            return udid
+        return ""
     if is_autopilot_devices_family(family):
         for column in ("AutopilotObjectId", "SerialNumber"):
             value = str(row.get(column, "") or "").strip()
@@ -688,7 +718,10 @@ def identity_display_column(
 ) -> str:
     if not family:
         return ""
-    candidates = FAMILY_IDENTITY_DISPLAY.get(family, ())
+    candidates = FAMILY_IDENTITY_DISPLAY.get(
+        canonical_comparison_family(family) or family or "",
+        (),
+    )
     normalized = {header.lower(): header for header in headers}
     for candidate in candidates:
         if candidate.lower() in normalized:
@@ -711,7 +744,7 @@ def comparison_summary_unit(family: str | None) -> str:
         USER_PROPERTIES_FAMILY,
     }:
         return "users"
-    if family in _DEVICE_COMPARISON_FAMILIES or is_android_devices_family(family):
+    if family in _DEVICE_COMPARISON_FAMILIES or is_inventory_device_family(family):
         return "devices"
     return "rows"
 
@@ -903,6 +936,38 @@ def _android_device_identity_label(
     intune_id = _pick_identity_label(primary_row, fallback_row, ("IntuneDeviceId",))
     if intune_id:
         return intune_id
+    return key
+
+
+def _ios_device_identity_label(
+    key: str,
+    change: str,
+    before_map: dict[str, dict[str, str]],
+    after_map: dict[str, dict[str, str]],
+) -> str:
+    if change == "Added":
+        primary_row, fallback_row = after_map.get(key, {}), after_map.get(key, {})
+    elif change == "Removed":
+        primary_row, fallback_row = before_map.get(key, {}), before_map.get(key, {})
+    else:
+        primary_row, fallback_row = after_map.get(key, {}), before_map.get(key, {})
+    device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+    serial = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+    if device_name and serial:
+        return f"{device_name} · {serial}"
+    if device_name:
+        return device_name
+    if serial:
+        return serial
+    entra_id = _pick_identity_label(primary_row, fallback_row, ("EntraDeviceId",))
+    if entra_id:
+        return entra_id
+    intune_id = _pick_identity_label(primary_row, fallback_row, ("IntuneDeviceId",))
+    if intune_id:
+        return intune_id
+    udid = _pick_identity_label(primary_row, fallback_row, ("UDID",))
+    if udid:
+        return udid
     return key
 
 
@@ -1141,6 +1206,44 @@ def _attach_detail_identity(
         if user_principal_name:
             detail["UserPrincipalName"] = user_principal_name
         return
+    if is_ios_devices_family(family):
+        detail["identity"] = _ios_device_identity_label(
+            key,
+            change,
+            before_map,
+            after_map,
+        )
+        before_row = before_map.get(key, {})
+        after_row = after_map.get(key, {})
+        if change == "Added":
+            primary_row, fallback_row = after_row, after_row
+        elif change == "Removed":
+            primary_row, fallback_row = before_row, before_row
+        else:
+            primary_row, fallback_row = after_row, before_row
+        device_name = _pick_identity_label(primary_row, fallback_row, ("DeviceName",))
+        if device_name:
+            detail["device_name"] = device_name
+        serial_number = _pick_identity_label(primary_row, fallback_row, ("SerialNumber",))
+        if serial_number:
+            detail["serial_number"] = serial_number
+        entra_device_id = _pick_identity_label(primary_row, fallback_row, ("EntraDeviceId",))
+        if entra_device_id:
+            detail["entra_device_id"] = entra_device_id
+        intune_device_id = _pick_identity_label(primary_row, fallback_row, ("IntuneDeviceId",))
+        if intune_device_id:
+            detail["intune_device_id"] = intune_device_id
+        udid = _pick_identity_label(primary_row, fallback_row, ("UDID",))
+        if udid:
+            detail["udid"] = udid
+        user_principal_name = _pick_identity_label(
+            primary_row,
+            fallback_row,
+            ("UserPrincipalName",),
+        )
+        if user_principal_name:
+            detail["UserPrincipalName"] = user_principal_name
+        return
     if is_autopilot_devices_family(family):
         detail["identity"] = _autopilot_device_identity_label(
             key,
@@ -1336,6 +1439,8 @@ def _compare_snapshots(
     skip_columns = set(key_columns)
     if is_android_devices_family(family):
         skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber"))
+    if is_ios_devices_family(family):
+        skip_columns.update(("EntraDeviceId", "IntuneDeviceId", "SerialNumber", "UDID"))
     if is_autopilot_devices_family(family):
         skip_columns.update(("AutopilotObjectId", "SerialNumber"))
     excluded_columns = _comparison_excluded_columns(family)

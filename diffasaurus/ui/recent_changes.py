@@ -247,6 +247,8 @@ class FamilyChangeSection(QFrame):
             elif item.family in {
                 "Intune_Android_Devices",
                 "Intune_Android_Devices_Report",
+                "Intune_iOS_Devices",
+                "Intune_iOS_Devices_Report",
                 "Intune_Devices_Autopilot",
             }:
                 added = item.summary.added
@@ -396,6 +398,8 @@ class FamilyChangeSection(QFrame):
                     "Entra_Users_Properties",
                     "Intune_Android_Devices",
                     "Intune_Android_Devices_Report",
+                    "Intune_iOS_Devices",
+                    "Intune_iOS_Devices_Report",
                     "Intune_Devices_Autopilot",
                     "Entra_Role_Assignments",
                 }:

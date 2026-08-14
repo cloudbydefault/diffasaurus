@@ -3108,7 +3108,7 @@ class IntuneAndroidDevicesComparisonTests(unittest.TestCase):
             self.assertEqual(histogram.get("OSVersion"), 1)
             self.assertEqual(histogram.get("FreeStorageGB"), 1)
 
-    def test_ios_last_sync_remains_comparable(self):
+    def test_ios_last_sync_excluded_from_semantic_changes(self):
         ios_headers = list(ANDROID_DEVICE_HEADERS)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3127,9 +3127,7 @@ class IntuneAndroidDevicesComparisonTests(unittest.TestCase):
                 suggested_key(ios_headers, "Intune_iOS_Devices"),
                 "Intune_iOS_Devices",
             )
-            self.assertEqual(result.changed, 1)
-            changed = next(detail for detail in result.details if detail["change"] == "Changed")
-            self.assertEqual(changed["column"], "LastSyncDateTime")
+            self.assertEqual(result.total_changes, 0)
 
     def test_generic_family_key_behavior_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3242,6 +3240,640 @@ class IntuneAndroidDevicesPresentationTests(unittest.TestCase):
         self.assertEqual(
             section.counts_label.text(),
             "1 device added · 2 devices removed · 5 devices changed",
+        )
+
+    def test_comparison_summary_unit_uses_devices(self):
+        from diffasaurus.core.report_history import comparison_summary_unit
+
+        self.assertEqual(comparison_summary_unit(self.FAMILY), "devices")
+        self.assertEqual(comparison_summary_unit(self.REPORT_FAMILY), "devices")
+
+
+IOS_AAD_ONE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+IOS_AAD_TWO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+IOS_INTUNE_ONE = "11111111-1111-1111-1111-111111111111"
+IOS_INTUNE_TWO = "22222222-2222-2222-2222-222222222222"
+IOS_UDID_ONE = "00000000-0000-0000-0000-000000000001"
+
+IOS_DEVICE_HEADERS = (
+    "DeviceName",
+    "ManagementName",
+    "IntuneDeviceId",
+    "EntraDeviceId",
+    "UDID",
+    "SerialNumber",
+    "IMEI",
+    "MEID",
+    "Manufacturer",
+    "Model",
+    "OperatingSystem",
+    "OSVersion",
+    "UserDisplayName",
+    "UserPrincipalName",
+    "EmailAddress",
+    "PhoneNumber",
+    "OwnerType",
+    "ManagementAgent",
+    "ManagementState",
+    "DeviceEnrollmentType",
+    "EnrollmentProfileName",
+    "EnrolledDateTime",
+    "LastSyncDateTime",
+    "DaysSinceLastSync",
+    "DeviceActivityStatus",
+    "ComplianceState",
+    "AzureADRegistered",
+    "IsSupervised",
+    "IsEncrypted",
+    "JailBroken",
+    "EASActivated",
+    "EASActivationId",
+    "EASActivationDateTime",
+    "SubscriberCarrier",
+    "CellularTechnology",
+    "WiFiMacAddress",
+    "EthernetMacAddress",
+    "ICCID",
+    "TotalStorageGB",
+    "FreeStorageGB",
+    "ActivationLockBypassCode",
+    "HasActivationBypassCode",
+)
+
+
+def ios_device_row(
+    *,
+    entra_id: str = IOS_AAD_ONE,
+    intune_id: str = IOS_INTUNE_ONE,
+    udid: str = IOS_UDID_ONE,
+    device_name: str = "iPhone-15",
+    serial: str = "SN-IOS-1",
+    os_version: str = "17.5",
+    compliance: str = "compliant",
+    encrypted: str = "True",
+    supervised: str = "True",
+    jailbroken: str = "False",
+    owner: str = "company",
+    activity: str = "Active <=30d",
+    user_upn: str = "ada@example.com",
+    manufacturer: str = "Apple",
+    model: str = "iPhone 15",
+    imei: str = "",
+    phone: str = "",
+    iccid: str = "",
+    last_sync: str = "2026-08-01T00:00:00Z",
+    days_since_sync: str = "5",
+    free_storage: str = "64",
+    total_storage: str = "128",
+    bypass_code: str = "",
+    has_bypass_code: str = "No",
+    **extra,
+) -> dict[str, str]:
+    row = {
+        "DeviceName": device_name,
+        "ManagementName": device_name,
+        "IntuneDeviceId": intune_id,
+        "EntraDeviceId": entra_id,
+        "UDID": udid,
+        "SerialNumber": serial,
+        "IMEI": imei,
+        "MEID": "",
+        "Manufacturer": manufacturer,
+        "Model": model,
+        "OperatingSystem": "iOS",
+        "OSVersion": os_version,
+        "UserDisplayName": "Ada",
+        "UserPrincipalName": user_upn,
+        "EmailAddress": user_upn,
+        "PhoneNumber": phone,
+        "OwnerType": owner,
+        "ManagementAgent": "mdm",
+        "ManagementState": "managed",
+        "DeviceEnrollmentType": "deviceEnrollmentProgram",
+        "EnrollmentProfileName": "Corporate iOS",
+        "EnrolledDateTime": "2026-01-01T00:00:00Z",
+        "LastSyncDateTime": last_sync,
+        "DaysSinceLastSync": days_since_sync,
+        "DeviceActivityStatus": activity,
+        "ComplianceState": compliance,
+        "AzureADRegistered": "True",
+        "IsSupervised": supervised,
+        "IsEncrypted": encrypted,
+        "JailBroken": jailbroken,
+        "EASActivated": "False",
+        "EASActivationId": "",
+        "EASActivationDateTime": "",
+        "SubscriberCarrier": "",
+        "CellularTechnology": "",
+        "WiFiMacAddress": "",
+        "EthernetMacAddress": "",
+        "ICCID": iccid,
+        "TotalStorageGB": total_storage,
+        "FreeStorageGB": free_storage,
+        "ActivationLockBypassCode": bypass_code,
+        "HasActivationBypassCode": has_bypass_code,
+    }
+    row.update(extra)
+    return row
+
+
+class IntuneIOSDevicesComparisonTests(unittest.TestCase):
+    FAMILY = "Intune_iOS_Devices"
+    REPORT_FAMILY = "Intune_iOS_Devices_Report"
+
+    def _write_pair(
+        self,
+        root: Path,
+        baseline_rows,
+        latest_rows,
+        *,
+        family: str | None = None,
+    ):
+        family = family or self.FAMILY
+        template = ios_device_row()
+        for path, rows in (
+            (root / f"{family}_20260731-042100.csv", baseline_rows),
+            (root / f"{family}_20260804-042100.csv", latest_rows),
+        ):
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(template.keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        snapshots = scan_report_history(root)[family]
+        return snapshots[0], snapshots[1]
+
+    def _compare(self, baseline, latest, family: str | None = None):
+        family = family or baseline.family
+        return compare_snapshots(
+            baseline,
+            latest,
+            suggested_key(baseline.headers, family),
+            family,
+        )
+
+    def test_report_family_parses_report_suffix(self):
+        path = Path("Intune_iOS_Devices_Report_20260812-170000.csv")
+        self.assertEqual(report_family(path), self.REPORT_FAMILY)
+
+    def test_alias_does_not_merge_histories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_report(
+                root / "Intune_iOS_Devices_Report_20260731-042100.csv",
+                [ios_device_row()],
+            )
+            write_report(
+                root / "Intune_iOS_Devices_20260804-042100.csv",
+                [ios_device_row(device_name="Current exporter")],
+            )
+            families = scan_report_history(root)
+            self.assertIn(self.REPORT_FAMILY, families)
+            self.assertIn(self.FAMILY, families)
+            self.assertEqual(len(families[self.REPORT_FAMILY]), 1)
+            self.assertEqual(len(families[self.FAMILY]), 1)
+
+    def test_entra_device_id_is_preferred_key(self):
+        headers = list(IOS_DEVICE_HEADERS)
+        self.assertEqual(suggested_key(headers, self.FAMILY), "EntraDeviceId")
+        self.assertEqual(suggested_key(headers, self.REPORT_FAMILY), "EntraDeviceId")
+
+    def test_legacy_report_family_uses_same_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(compliance="compliant")],
+                [ios_device_row(compliance="noncompliant")],
+                family=self.REPORT_FAMILY,
+            )
+            result = self._compare(baseline, latest, self.REPORT_FAMILY)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "ComplianceState")
+            self.assertEqual(detail_identity(changed), "iPhone-15 · SN-IOS-1")
+
+    def test_fallback_to_intune_device_id_when_entra_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(entra_id="", intune_id=IOS_INTUNE_ONE, compliance="compliant")],
+                [ios_device_row(entra_id="", intune_id=IOS_INTUNE_ONE, compliance="noncompliant")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_fallback_to_serial_number_when_entra_and_intune_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    ios_device_row(
+                        entra_id="",
+                        intune_id="",
+                        udid="",
+                        serial="SN-ONLY-1",
+                        compliance="compliant",
+                    ),
+                ],
+                [
+                    ios_device_row(
+                        entra_id="",
+                        intune_id="",
+                        udid="",
+                        serial="SN-ONLY-1",
+                        compliance="noncompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+
+    def test_fallback_to_udid_when_other_ids_blank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    ios_device_row(
+                        device_name="",
+                        entra_id="",
+                        intune_id="",
+                        serial="",
+                        udid="UDID-ONLY-1",
+                        compliance="compliant",
+                    ),
+                ],
+                [
+                    ios_device_row(
+                        device_name="",
+                        entra_id="",
+                        intune_id="",
+                        serial="",
+                        udid="UDID-ONLY-1",
+                        compliance="noncompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(detail_identity(changed), "UDID-ONLY-1")
+
+    def test_device_name_rename_remains_one_changed_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(device_name="Old iPhone Name")],
+                [ios_device_row(device_name="New iPhone Name")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed, result.changed), (0, 0, 1))
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            self.assertEqual(changed["column"], "DeviceName")
+            self.assertEqual(detail_identity(changed), "New iPhone Name · SN-IOS-1")
+
+    def test_friendly_added_and_removed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(device_name="Removed iPhone", serial="SN-REMOVE")],
+                [
+                    ios_device_row(
+                        entra_id=IOS_AAD_TWO,
+                        intune_id=IOS_INTUNE_TWO,
+                        udid="00000000-0000-0000-0000-000000000002",
+                        device_name="Added iPhone",
+                        serial="SN-ADD",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual((result.added, result.removed), (1, 1))
+            added = next(detail for detail in result.details if detail["change"] == "Added")
+            removed = next(detail for detail in result.details if detail["change"] == "Removed")
+            self.assertEqual(detail_identity(added), "Added iPhone · SN-ADD")
+            self.assertEqual(detail_identity(removed), "Removed iPhone · SN-REMOVE")
+
+    def test_sensitive_ids_are_not_used_as_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    ios_device_row(
+                        device_name="",
+                        serial="",
+                        entra_id="",
+                        intune_id=IOS_INTUNE_ONE,
+                        udid="",
+                        imei="IMEI-ONLY",
+                        phone="555-0100",
+                        iccid="ICCID-ONLY",
+                    ),
+                ],
+                [
+                    ios_device_row(
+                        device_name="",
+                        serial="",
+                        entra_id="",
+                        intune_id=IOS_INTUNE_ONE,
+                        udid="",
+                        imei="IMEI-ONLY",
+                        phone="555-0100",
+                        iccid="ICCID-ONLY",
+                        compliance="noncompliant",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            changed = next(detail for detail in result.details if detail["change"] == "Changed")
+            identity = detail_identity(changed)
+            self.assertEqual(identity, IOS_INTUNE_ONE)
+            self.assertNotIn("IMEI", identity)
+            self.assertNotIn("555-0100", identity)
+            self.assertNotIn("ICCID", identity)
+
+    def test_days_since_last_sync_only_drift_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(days_since_sync="5", last_sync="2026-08-01T00:00:00Z")],
+                [ios_device_row(days_since_sync="6", last_sync="2026-08-01T00:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_last_sync_date_time_excluded_from_semantic_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(last_sync="2026-08-01T00:00:00Z")],
+                [ios_device_row(last_sync="2026-08-04T12:00:00Z")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_free_storage_gb_excluded_from_semantic_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(free_storage="64")],
+                [ios_device_row(free_storage="32")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.total_changes, 0)
+
+    def test_total_storage_gb_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(total_storage="128")],
+                [ios_device_row(total_storage="256")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "TotalStorageGB")
+            self.assertEqual(changed["before"], "128")
+            self.assertEqual(changed["after"], "256")
+
+    def test_device_activity_status_threshold_change_remains_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(activity="Active <=30d", days_since_sync="10")],
+                [ios_device_row(activity="Stale 31-90d", days_since_sync="45")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(detail for detail in result.details if detail["column"] == "DeviceActivityStatus")
+            self.assertEqual(changed["before"], "Active <=30d")
+            self.assertEqual(changed["after"], "Stale 31-90d")
+
+    def test_posture_property_changes_remain_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [
+                    ios_device_row(
+                        compliance="compliant",
+                        os_version="17.5",
+                        supervised="True",
+                        encrypted="True",
+                        jailbroken="False",
+                    ),
+                ],
+                [
+                    ios_device_row(
+                        compliance="noncompliant",
+                        os_version="18.0",
+                        supervised="False",
+                        encrypted="False",
+                        jailbroken="True",
+                    ),
+                ],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details if detail["change"] == "Changed"}
+            self.assertIn("ComplianceState", columns)
+            self.assertIn("OSVersion", columns)
+            self.assertIn("IsSupervised", columns)
+            self.assertIn("IsEncrypted", columns)
+            self.assertIn("JailBroken", columns)
+
+    def test_activation_lock_bypass_code_never_appears_in_semantic_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(bypass_code="", has_bypass_code="No")],
+                [ios_device_row(bypass_code="SECRET-CODE", has_bypass_code="Yes")],
+            )
+            result = self._compare(baseline, latest)
+            columns = {detail["column"] for detail in result.details}
+            self.assertNotIn("ActivationLockBypassCode", columns)
+            for detail in result.details:
+                self.assertNotIn("SECRET-CODE", detail.get("before", ""))
+                self.assertNotIn("SECRET-CODE", detail.get("after", ""))
+
+    def test_has_activation_bypass_code_remains_comparable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, latest = self._write_pair(
+                Path(directory),
+                [ios_device_row(has_bypass_code="No")],
+                [ios_device_row(has_bypass_code="Yes", bypass_code="SECRET-CODE")],
+            )
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 1)
+            changed = next(
+                detail for detail in result.details if detail["column"] == "HasActivationBypassCode"
+            )
+            self.assertEqual(changed["before"], "No")
+            self.assertEqual(changed["after"], "Yes")
+
+    def test_property_frequency_after_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_rows = [
+                ios_device_row(
+                    entra_id=IOS_AAD_ONE,
+                    compliance="compliant",
+                    os_version="17.5",
+                    free_storage="64",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+                ios_device_row(
+                    entra_id=IOS_AAD_TWO,
+                    intune_id=IOS_INTUNE_TWO,
+                    udid="00000000-0000-0000-0000-000000000002",
+                    device_name="iPad-10",
+                    serial="SN-IOS-2",
+                    compliance="compliant",
+                    os_version="17.5",
+                    free_storage="48",
+                    last_sync="2026-08-01T00:00:00Z",
+                    days_since_sync="5",
+                ),
+            ]
+            latest_rows = [
+                ios_device_row(
+                    entra_id=IOS_AAD_ONE,
+                    compliance="noncompliant",
+                    os_version="17.5",
+                    free_storage="64",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+                ios_device_row(
+                    entra_id=IOS_AAD_TWO,
+                    intune_id=IOS_INTUNE_TWO,
+                    udid="00000000-0000-0000-0000-000000000002",
+                    device_name="iPad-10",
+                    serial="SN-IOS-2",
+                    compliance="compliant",
+                    os_version="18.0",
+                    free_storage="40",
+                    last_sync="2026-08-04T12:00:00Z",
+                    days_since_sync="8",
+                ),
+            ]
+            baseline, latest = self._write_pair(Path(directory), baseline_rows, latest_rows)
+            result = self._compare(baseline, latest)
+            self.assertEqual(result.changed, 2)
+            histogram: dict[str, int] = {}
+            for detail in result.details:
+                if detail["change"] != "Changed":
+                    continue
+                histogram[detail["column"]] = histogram.get(detail["column"], 0) + 1
+            self.assertNotIn("LastSyncDateTime", histogram)
+            self.assertNotIn("DaysSinceLastSync", histogram)
+            self.assertNotIn("FreeStorageGB", histogram)
+            self.assertEqual(histogram.get("ComplianceState"), 1)
+            self.assertEqual(histogram.get("OSVersion"), 1)
+
+
+class IntuneIOSDevicesPresentationTests(unittest.TestCase):
+    FAMILY = "Intune_iOS_Devices"
+    REPORT_FAMILY = "Intune_iOS_Devices_Report"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_property_labels_and_tooltips(self):
+        from diffasaurus.ui.comparison_presentation import (
+            property_display_text,
+            property_tooltip,
+        )
+
+        self.assertEqual(property_display_text("DeviceName", self.FAMILY), "Device name")
+        self.assertEqual(property_display_text("ComplianceState", self.FAMILY), "Compliance state")
+        self.assertEqual(property_display_text("OSVersion", self.FAMILY), "OS version")
+        self.assertEqual(property_display_text("JailBroken", self.FAMILY), "Jailbroken")
+        self.assertEqual(
+            property_display_text("HasActivationBypassCode", self.FAMILY),
+            "Has activation bypass code",
+        )
+        self.assertEqual(property_display_text("", self.FAMILY, change="Added"), "Device")
+        self.assertEqual(property_display_text("", self.REPORT_FAMILY, change="Removed"), "Device")
+        self.assertEqual(property_display_text("FutureField", self.FAMILY), "FutureField")
+        tooltip = property_tooltip("WiFiMacAddress", self.FAMILY)
+        self.assertIn("Wi-Fi MAC address", tooltip)
+        self.assertIn("CSV field: WiFiMacAddress", tooltip)
+
+    def test_identity_tooltip_excludes_sensitive_ids(self):
+        from diffasaurus.ui.comparison_presentation import identity_tooltip
+
+        detail = {
+            "identity": "iPhone-15 · SN-IOS-1",
+            "device_name": "iPhone-15",
+            "serial_number": "SN-IOS-1",
+            "entra_device_id": IOS_AAD_ONE,
+            "intune_device_id": IOS_INTUNE_ONE,
+            "udid": IOS_UDID_ONE,
+            "UserPrincipalName": "ada@example.com",
+            "IMEI": "secret-imei",
+            "PhoneNumber": "555-0100",
+            "ICCID": "secret-iccid",
+            "ActivationLockBypassCode": "secret-code",
+            "key": IOS_AAD_ONE,
+        }
+        tooltip = identity_tooltip(detail, self.FAMILY)
+        self.assertIn("iPhone-15 · SN-IOS-1", tooltip)
+        self.assertIn("EntraDeviceId:", tooltip)
+        self.assertIn("UDID:", tooltip)
+        self.assertIn("UserPrincipalName:", tooltip)
+        self.assertNotIn("IMEI", tooltip)
+        self.assertNotIn("555-0100", tooltip)
+        self.assertNotIn("ICCID", tooltip)
+        self.assertNotIn("secret-code", tooltip)
+
+    def test_recent_changes_detail_table_uses_friendly_labels(self):
+        from diffasaurus.core.report_history import ComparisonSummary
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        section._family = self.FAMILY
+        section._details = ComparisonSummary(
+            added=0,
+            removed=0,
+            changed=1,
+            stable=0,
+            details=(
+                {
+                    "change": "Changed",
+                    "key": IOS_AAD_ONE,
+                    "identity": "iPhone-15 · SN-IOS-1",
+                    "column": "ComplianceState",
+                    "before": "compliant",
+                    "after": "noncompliant",
+                    "device_name": "iPhone-15",
+                    "serial_number": "SN-IOS-1",
+                },
+            ),
+        )
+        section._expanded = True
+        section._filter = "All"
+        section._apply_detail_filters()
+        self.assertEqual(section.detail_table.item(0, 1).text(), "iPhone-15 · SN-IOS-1")
+        self.assertEqual(section.detail_table.item(0, 2).text(), "Compliance state")
+
+    def test_recent_changes_summary_uses_device_wording(self):
+        from diffasaurus.core.report_history import ComparisonSummary, FamilyChangeStatus
+        from diffasaurus.ui.recent_changes import FamilyChangeSection
+
+        section = FamilyChangeSection()
+        status = FamilyChangeStatus(
+            family=self.REPORT_FAMILY,
+            status="changed",
+            baseline=None,
+            latest=None,
+            key_column="EntraDeviceId",
+            summary=ComparisonSummary(added=2, removed=0, changed=5, stable=0, details=()),
+            reason="",
+        )
+        section.apply_status(status, datetime(2026, 8, 4, 12))
+        self.assertEqual(
+            section.counts_label.text(),
+            "2 devices added · 0 devices removed · 5 devices changed",
         )
 
     def test_comparison_summary_unit_uses_devices(self):
@@ -3599,7 +4231,7 @@ class IntuneAutopilotDevicesComparisonTests(unittest.TestCase):
             )
             self.assertEqual(result.total_changes, 0)
 
-    def test_ios_last_sync_remains_comparable(self):
+    def test_ios_last_sync_excluded_from_semantic_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             row = android_device_row(last_sync="2026-08-01T00:00:00Z")
@@ -3617,7 +4249,7 @@ class IntuneAutopilotDevicesComparisonTests(unittest.TestCase):
                 suggested_key(snapshots[0].headers, "Intune_iOS_Devices"),
                 "Intune_iOS_Devices",
             )
-            self.assertEqual(result.changed, 1)
+            self.assertEqual(result.total_changes, 0)
 
     def test_generic_family_key_behavior_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
