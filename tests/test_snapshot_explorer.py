@@ -5,13 +5,13 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from diffasaurus.core.dashboard_registry import get_dashboard_definition
 from diffasaurus.core.report_history import ReportSnapshot
@@ -777,6 +777,61 @@ class SnapshotExplorerTests(unittest.TestCase):
                     )
             finally:
                 _close_explorer(explorer)
+
+    def test_open_filter_constructs_dialog_with_model_and_filters(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.model.set_table(
+                ["Name", "State"],
+                [["Alice", "Enabled"], ["Bob", "Disabled"]],
+            )
+            explorer._filters = {1: {"allowed": {"Enabled"}, "allow_empty": False}}
+            fake_dialog = MagicMock()
+            fake_dialog.exec.return_value = QDialog.DialogCode.Rejected
+
+            with patch(
+                "diffasaurus.ui.snapshot_explorer.MultiColumnFilterDialog",
+                return_value=fake_dialog,
+            ) as constructor:
+                explorer.open_filter()
+
+            constructor.assert_called_once_with(
+                explorer,
+                explorer.model,
+                current_filters={1: {"allowed": {"Enabled"}, "allow_empty": False}},
+            )
+            fake_dialog.exec.assert_called_once()
+            self.assertEqual(explorer.proxy.active_filter_count(), 0)
+        finally:
+            _close_explorer(explorer)
+
+    def test_open_filter_accepted_applies_result_filters(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.model.set_table(
+                ["Name", "State"],
+                [["Alice", "Enabled"], ["Bob", "Disabled"]],
+            )
+            fake_dialog = MagicMock()
+            fake_dialog.exec.return_value = QDialog.DialogCode.Accepted
+            fake_dialog.result_filters = {
+                1: {"allowed": {"Disabled"}, "allow_empty": False},
+            }
+
+            with patch(
+                "diffasaurus.ui.snapshot_explorer.MultiColumnFilterDialog",
+                return_value=fake_dialog,
+            ):
+                explorer.open_filter()
+
+            self.assertEqual(explorer.proxy.active_filter_count(), 1)
+            self.assertEqual(explorer.proxy.rowCount(), 1)
+            self.assertEqual(
+                explorer.proxy.data(explorer.proxy.index(0, 0)),
+                "Bob",
+            )
+        finally:
+            _close_explorer(explorer)
 
 
 if __name__ == "__main__":
