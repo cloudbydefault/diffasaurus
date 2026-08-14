@@ -18,19 +18,7 @@ tenant.
 
 ## High-level architecture
 
-```
-Azure Automation / local collector
-        ↓
-Managed Identity / delegated auth
-        ↓
-Microsoft Graph / Exchange Online
-        ↓
-dated report artifacts
-        ↓
-SharePoint / OneDrive / local folder
-        ↓
-Diffasaurus
-```
+![Diffasaurus collection architecture](collection-architecture.svg)
 
 Collectors run on a schedule or on demand. Artifacts land in a report source
 folder that Diffasaurus reads locally (including OneDrive- or SharePoint-synced

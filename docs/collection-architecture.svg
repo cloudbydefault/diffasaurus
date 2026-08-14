@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 400" role="img" aria-labelledby="title desc">
+  <title>Diffasaurus collection architecture</title>
+  <desc>Historical snapshots are collected from Microsoft 365 services by schedulers or on-demand collectors, stored as dated artifacts in a report source, and read locally by Diffasaurus for investigation. Diffasaurus does not reconstruct history from current tenant state.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1520"/>
+      <stop offset="100%" stop-color="#101b26"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#65a9ff"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1180" height="400" fill="url(#bg)"/>
+  <text x="590" y="34" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="700">Diffasaurus collection architecture</text>
+  <text x="590" y="58" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">Historical evidence comes from dated snapshots - not live tenant reconstruction</text>
+
+  <g filter="url(#shadow)">
+    <rect x="40" y="92" width="150" height="72" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="115" y="120" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Microsoft 365</text>
+    <text x="115" y="140" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Entra / Intune</text>
+    <text x="115" y="156" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Exchange / related</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="230" y="84" width="170" height="88" rx="12" fill="#152331" stroke="#4fd1a5" stroke-width="1.5"/>
+    <text x="315" y="112" text-anchor="middle" fill="#8bd450" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Collectors</text>
+    <text x="315" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Azure Automation</text>
+    <text x="315" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">or local PowerShell</text>
+    <text x="315" y="164" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">scheduled / on-demand</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="440" y="84" width="170" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="525" y="112" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Authentication</text>
+    <text x="525" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Managed Identity</text>
+    <text x="525" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">or delegated auth</text>
+    <text x="525" y="164" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">as appropriate</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="650" y="84" width="170" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="735" y="112" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Microsoft APIs</text>
+    <text x="735" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Microsoft Graph</text>
+    <text x="735" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Exchange Online</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="860" y="76" width="190" height="104" rx="12" fill="#152331" stroke="#65a9ff" stroke-width="1.5"/>
+    <text x="955" y="104" text-anchor="middle" fill="#65a9ff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Dated artifacts</text>
+    <text x="955" y="124" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">CSV / JSON</text>
+    <text x="955" y="140" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">policy bundles</text>
+    <text x="955" y="160" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">immutable snapshots</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="300" y="248" width="220" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="410" y="276" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Report source</text>
+    <text x="410" y="296" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">SharePoint / OneDrive</text>
+    <text x="410" y="312" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">or local folder</text>
+    <text x="410" y="328" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">synced to Diffasaurus host</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="620" y="236" width="200" height="112" rx="12" fill="#102b32" stroke="#4fd1a5" stroke-width="2"/>
+    <text x="720" y="268" text-anchor="middle" fill="#8bd450" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">Diffasaurus</text>
+    <text x="720" y="290" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">read-only local investigation</text>
+    <text x="720" y="308" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">reads artifacts only</text>
+    <text x="720" y="324" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">no live Graph for history</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="900" y="248" width="220" height="88" rx="12" fill="#152331" stroke="#f5b942"/>
+    <text x="1010" y="276" text-anchor="middle" fill="#f5b942" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Historical investigation</text>
+    <text x="1010" y="296" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Recent Changes / PIT</text>
+    <text x="1010" y="312" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Compare / Run Health</text>
+    <text x="1010" y="328" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">missing is not unchanged</text>
+  </g>
+
+  <line x1="190" y1="128" x2="228" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="128" x2="438" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="610" y1="128" x2="648" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="820" y1="128" x2="858" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M955 180 L955 214 L410 214 L410 246" fill="none" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="520" y1="292" x2="618" y2="292" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="820" y1="292" x2="898" y2="292" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>
