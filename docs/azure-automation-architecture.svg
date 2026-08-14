@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 460" role="img" aria-labelledby="title desc">
+  <title>Azure Automation collector architecture for Diffasaurus</title>
+  <desc>Scheduled Azure Automation runbooks authenticate with a system-assigned managed identity, call Microsoft Graph and Exchange Online with collector-specific permissions, publish dated snapshot artifacts to SharePoint, and sync to the Diffasaurus report source.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1520"/>
+      <stop offset="100%" stop-color="#101b26"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#65a9ff"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1180" height="460" fill="url(#bg)"/>
+  <text x="590" y="34" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="700">Azure Automation collectors</text>
+  <text x="590" y="58" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">Unattended snapshot collection into a Diffasaurus-compatible report source</text>
+
+  <g filter="url(#shadow)">
+    <rect x="60" y="92" width="180" height="72" rx="12" fill="#152331" stroke="#4fd1a5" stroke-width="1.5"/>
+    <text x="150" y="120" text-anchor="middle" fill="#8bd450" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Automation Account</text>
+    <text x="150" y="140" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">PowerShell 7 runbooks</text>
+    <text x="150" y="156" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">scheduled unattended</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="280" y="84" width="190" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="375" y="112" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Managed Identity</text>
+    <text x="375" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">system-assigned</text>
+    <text x="375" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Connect-MgGraph -Identity</text>
+    <text x="375" y="164" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">no embedded secrets</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="510" y="84" width="210" height="88" rx="12" fill="#152331" stroke="#f5b942"/>
+    <text x="615" y="112" text-anchor="middle" fill="#f5b942" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Graph permissions</text>
+    <text x="615" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">collector-specific scope</text>
+    <text x="615" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">least privilege per runbook</text>
+    <text x="615" y="164" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">not one universal set</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="760" y="84" width="170" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="845" y="112" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Microsoft APIs</text>
+    <text x="845" y="132" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Microsoft Graph</text>
+    <text x="845" y="148" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Exchange Online</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="960" y="76" width="180" height="104" rx="12" fill="#152331" stroke="#65a9ff" stroke-width="1.5"/>
+    <text x="1050" y="104" text-anchor="middle" fill="#65a9ff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Snapshot generation</text>
+    <text x="1050" y="124" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">temporary workspace</text>
+    <text x="1050" y="140" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">dated CSV / bundles</text>
+    <text x="1050" y="160" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">publish when complete</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="220" y="248" width="220" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="330" y="276" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">SharePoint library</text>
+    <text x="330" y="296" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">contoso.sharepoint.com</text>
+    <text x="330" y="312" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Reporting/Diffasaurus</text>
+    <text x="330" y="328" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">generic example path</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="500" y="248" width="220" height="88" rx="12" fill="#152331" stroke="#26394a"/>
+    <text x="610" y="276" text-anchor="middle" fill="#7fd9ce" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">OneDrive / SharePoint sync</text>
+    <text x="610" y="296" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">local synced folder</text>
+    <text x="610" y="312" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">on investigator machine</text>
+    <text x="610" y="328" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">Diffasaurus reads locally</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="780" y="236" width="220" height="112" rx="12" fill="#102b32" stroke="#4fd1a5" stroke-width="2"/>
+    <text x="890" y="268" text-anchor="middle" fill="#8bd450" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">Diffasaurus</text>
+    <text x="890" y="290" text-anchor="middle" fill="#f2f7fb" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Report Source selection</text>
+    <text x="890" y="308" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">read-only investigation</text>
+    <text x="890" y="324" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">historical artifacts only</text>
+  </g>
+
+  <rect x="70" y="372" width="250" height="58" rx="10" fill="#102b32" stroke="#4fd1a5"/>
+  <text x="195" y="394" text-anchor="middle" fill="#8bd450" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">Scheduled unattended collection</text>
+  <text x="195" y="412" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">daily or business-day cadence</text>
+
+  <rect x="360" y="372" width="220" height="58" rx="10" fill="#102b32" stroke="#f5b942"/>
+  <text x="470" y="394" text-anchor="middle" fill="#f5b942" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">Least privilege</text>
+  <text x="470" y="412" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">permissions per collector</text>
+
+  <rect x="620" y="372" width="220" height="58" rx="10" fill="#102b32" stroke="#65a9ff"/>
+  <text x="730" y="394" text-anchor="middle" fill="#65a9ff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">No embedded secrets</text>
+  <text x="730" y="412" text-anchor="middle" fill="#8295a8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10">Managed Identity preferred</text>
+
+  <line x1="240" y1="128" x2="278" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="470" y1="128" x2="508" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="720" y1="128" x2="758" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="930" y1="128" x2="958" y2="128" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M1050 180 L1050 210 L330 210 L330 246" fill="none" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="440" y1="292" x2="498" y2="292" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="720" y1="292" x2="778" y2="292" stroke="#65a9ff" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>

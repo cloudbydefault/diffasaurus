@@ -11,19 +11,7 @@ into the active report source.
 
 ## Recommended design
 
-```
-Automation Account
-        ↓
-System-assigned Managed Identity
-        ↓
-Microsoft Graph permissions (per collector)
-        ↓
-PowerShell 7 runbooks
-        ↓
-temporary report generation
-        ↓
-SharePoint / OneDrive-backed report source
-```
+![Azure Automation collector architecture](../../docs/azure-automation-architecture.svg)
 
 Use **PowerShell 7** runbooks in Azure Automation. Authenticate with **Managed
 Identity** where possible—no secrets embedded in scripts or this repository.

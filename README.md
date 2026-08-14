@@ -86,6 +86,10 @@ and [Azure Automation collectors](collectors/azure-automation/README.md).
 
 **Run health** — Weekday collection evidence for the last ten business days; a missing CSV means no observed output, not proof about an external scheduler.
 
+![Diffasaurus Run Health](docs/diffasaurus-run-health.png)
+
+*Run Health tracks weekday collection evidence across report families.*
+
 **Fossil library** — Searchable list of snapshot files in the active report source.
 
 **Configuration policies** — Dedicated Intune policy investigation from rich Phase 0
