@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -96,6 +96,11 @@ class FamilyChangeSection(QFrame):
         self._semantic_details: tuple[dict[str, str], ...] = ()
         self._filter = "All"
         self._expanded = False
+        self._configured_detail_family: str | None = None
+        self._detail_search_timer = QTimer(self)
+        self._detail_search_timer.setSingleShot(True)
+        self._detail_search_timer.setInterval(150)
+        self._detail_search_timer.timeout.connect(self._on_detail_search_timer)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 14, 18, 14)
@@ -156,7 +161,7 @@ class FamilyChangeSection(QFrame):
         self.detail_search = QLineEdit()
         self.detail_search.setPlaceholderText("Search keys or changed values…")
         self.detail_search.setMinimumWidth(260)
-        self.detail_search.textChanged.connect(self._apply_detail_filters)
+        self.detail_search.textChanged.connect(self._schedule_detail_filters)
         filter_row.addWidget(self.detail_search)
         details_layout.addLayout(filter_row)
 
@@ -311,8 +316,13 @@ class FamilyChangeSection(QFrame):
             self.compare_button.setText("Open in Compare")
         self.toggle_button.setEnabled(bool(comparable))
         self.toggle_button.setVisible(bool(comparable))
-        configure_comparison_detail_table(self.detail_table, item.family)
+        self._detail_search_timer.stop()
+        self.detail_search.blockSignals(True)
+        self.detail_search.clear()
+        self.detail_search.blockSignals(False)
+        self._configured_detail_family = None
         self._semantic_details = item.semantic_details
+        self._ensure_detail_table_configured()
 
         if comparable and (self._details or self._semantic_details):
             self._apply_detail_filters()
@@ -354,18 +364,29 @@ class FamilyChangeSection(QFrame):
         elif self._expanded:
             self._apply_detail_filters()
 
+    def _ensure_detail_table_configured(self) -> None:
+        if self._configured_detail_family == self._family:
+            return
+        configure_comparison_detail_table(self.detail_table, self._family)
+        self._configured_detail_family = self._family
+
     def _populate_semantic_detail_table(self, rows: list[dict[str, str]]) -> None:
-        self.detail_table.setRowCount(len(rows))
-        for row_index, detail in enumerate(rows):
-            values = (
-                detail.get("Change", ""),
-                detail.get("Identity", ""),
-                detail.get("Property", ""),
-                detail.get("Before", ""),
-                detail.get("After", ""),
-            )
-            for column, value in enumerate(values):
-                self.detail_table.setItem(row_index, column, QTableWidgetItem(value))
+        table = self.detail_table
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(len(rows))
+            for row_index, detail in enumerate(rows):
+                values = (
+                    detail.get("Change", ""),
+                    detail.get("Identity", ""),
+                    detail.get("Property", ""),
+                    detail.get("Before", ""),
+                    detail.get("After", ""),
+                )
+                for column, value in enumerate(values):
+                    table.setItem(row_index, column, QTableWidgetItem(value))
+        finally:
+            table.setUpdatesEnabled(True)
 
     def _set_filter(self, value: str):
         self._filter = value
@@ -373,7 +394,23 @@ class FamilyChangeSection(QFrame):
             button.setChecked(button.text() == value)
         self._apply_detail_filters()
 
-    def _apply_detail_filters(self):
+    def _schedule_detail_filters(self, text: str = "") -> None:
+        if not text.strip():
+            self._detail_search_timer.stop()
+            self._apply_detail_filters_now()
+            return
+        self._detail_search_timer.start()
+
+    def _on_detail_search_timer(self) -> None:
+        if not self._expanded:
+            return
+        self._apply_detail_filters_now()
+
+    def _apply_detail_filters(self) -> None:
+        self._detail_search_timer.stop()
+        self._apply_detail_filters_now()
+
+    def _apply_detail_filters_now(self) -> None:
         if not self._details and not self._semantic_details:
             self.detail_table.setRowCount(0)
             self.detail_notice.hide()
@@ -381,12 +418,13 @@ class FamilyChangeSection(QFrame):
         needle = self.detail_search.text().strip().lower()
         matching: list[dict[str, str]] = []
         has_more = False
+        use_semantic_layout = bool(self._semantic_details)
         source_details = (
             self._semantic_details
             if self._semantic_details
             else (self._details.details if self._details else ())
         )
-        if self._semantic_details and source_details and source_details[0].get("event_type"):
+        if use_semantic_layout and source_details and source_details[0].get("event_type"):
             from diffasaurus.ui.configuration_policy_presentation import (
                 semantic_event_details_to_display_rows,
             )
@@ -401,41 +439,12 @@ class FamilyChangeSection(QFrame):
             if len(matching) >= DETAIL_TABLE_LIMIT:
                 has_more = True
                 break
-            if "change" in detail and "Change" not in detail:
-                if self._family in {
-                    "Entra_Users_Activity",
-                    "Entra_Users_AuthenticationMethods_Hybrid",
-                    "Entra_Users_Properties",
-                    "Intune_Android_Devices",
-                    "Intune_Android_Devices_Report",
-                    "Intune_iOS_Devices",
-                    "Intune_iOS_Devices_Report",
-                    "Intune_ManagedDevices_Compliance",
-                    "Intune_Devices_Autopilot",
-                    "Exchange_SharedMailboxes",
-                    "Entra_Role_Assignments",
-                }:
-                    matching.append(detail)
-                else:
-                    matching.append(
-                        {
-                            "Change": detail.get("change", ""),
-                            "Identity": detail.get("identity", ""),
-                            "Property": detail.get("column", detail.get("property", "")),
-                            "Before": detail.get("before", ""),
-                            "After": detail.get("after", ""),
-                        }
-                    )
-            else:
-                matching.append(detail)
+            matching.append(detail)
 
-        use_semantic_layout = bool(self._semantic_details) or any(
-            "Change" in detail for detail in matching
-        )
         if use_semantic_layout:
             self._populate_semantic_detail_table(matching)
         else:
-            configure_comparison_detail_table(self.detail_table, self._family)
+            self._ensure_detail_table_configured()
             populate_comparison_detail_table(
                 self.detail_table,
                 matching,
