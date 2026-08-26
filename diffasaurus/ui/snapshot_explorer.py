@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -31,10 +34,15 @@ from diffasaurus.core.configuration_policies.integration import (
     resolve_bundle_for_anchor,
 )
 from diffasaurus.core.report_history import ReportSnapshot
+from diffasaurus.core.user_dashboards import (
+    UserDashboard,
+    UserDashboardStore,
+    named_filters_to_index,
+    validate_dashboard_columns,
+)
 from diffasaurus.models.csv_model import CsvTableModel, read_csv_table
 from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.background import BackgroundCall
-from diffasaurus.ui.dashboard_view import DashboardView
 from diffasaurus.ui.configuration_policy_presentation import count_semantic_settings
 from diffasaurus.ui.multi_column_filter import MultiColumnFilterDialog
 from diffasaurus.ui.snapshot_export import (
@@ -43,6 +51,14 @@ from diffasaurus.ui.snapshot_export import (
     visible_source_rows,
     write_csv_export,
 )
+from diffasaurus.ui.user_dashboard_editor import UserDashboardEditorDialog
+from diffasaurus.ui.user_dashboard_filters import (
+    capture_current_view,
+    configure_proxy_for_dashboard,
+    dashboard_export_filename,
+    dashboard_source_rows,
+)
+from diffasaurus.ui.user_dashboard_workspace import UserDashboardWorkspace
 
 LARGE_SNAPSHOT_ROW_THRESHOLD = 20_000
 
@@ -128,6 +144,8 @@ class SnapshotExplorer(QWidget):
         self._tasks: set[BackgroundCall] = set()
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
+        self._dashboard_store = UserDashboardStore()
+        self._smart_search_columns: list[int] | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -164,27 +182,63 @@ class SnapshotExplorer(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        tools = QHBoxLayout()
+        self.table_toolbar = QWidget()
+        table_tools = QHBoxLayout(self.table_toolbar)
+        table_tools.setContentsMargins(0, 0, 0, 0)
         self.filter_button = QPushButton("◇  Multi-column filter")
         self.clear_button = QPushButton("Clear filters")
         self.clear_button.setEnabled(False)
         self.export_view_button = QPushButton("Export view")
         self.export_selection_button = QPushButton("Export selection")
         self.export_selection_button.setEnabled(False)
+        self.save_as_dashboard_button = QPushButton("Save as dashboard")
+        self.save_as_dashboard_button.setObjectName("secondaryButton")
         self.search_mode = QComboBox()
         self.search_mode.addItem("Smart search", "smart")
         self.search_mode.addItem("All columns", "all")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search this snapshot…")
         self.search.setMinimumWidth(260)
-        tools.addWidget(self.filter_button)
-        tools.addWidget(self.clear_button)
-        tools.addWidget(self.export_view_button)
-        tools.addWidget(self.export_selection_button)
-        tools.addStretch()
-        tools.addWidget(self.search_mode)
-        tools.addWidget(self.search, 1)
-        layout.addLayout(tools)
+        table_tools.addWidget(self.filter_button)
+        table_tools.addWidget(self.clear_button)
+        table_tools.addWidget(self.export_view_button)
+        table_tools.addWidget(self.export_selection_button)
+        table_tools.addWidget(self.save_as_dashboard_button)
+        table_tools.addStretch()
+        table_tools.addWidget(self.search_mode)
+        table_tools.addWidget(self.search, 1)
+
+        self.dashboard_toolbar = QWidget()
+        dashboard_tools = QHBoxLayout(self.dashboard_toolbar)
+        dashboard_tools.setContentsMargins(0, 0, 0, 0)
+        self.new_dashboard_button = QPushButton("+ New dashboard")
+        self.import_dashboards_button = QPushButton("Import")
+        self.export_dashboards_button = QPushButton("Export definitions")
+        self.reset_dashboards_button = QPushButton("Reset my dashboards")
+        for button in (
+            self.new_dashboard_button,
+            self.import_dashboards_button,
+            self.export_dashboards_button,
+            self.reset_dashboards_button,
+        ):
+            button.setObjectName("secondaryButton")
+        dashboard_tools.addWidget(self.new_dashboard_button)
+        dashboard_tools.addStretch()
+        dashboard_tools.addWidget(self.import_dashboards_button)
+        dashboard_tools.addWidget(self.export_dashboards_button)
+        dashboard_tools.addWidget(self.reset_dashboards_button)
+
+        self.toolbar_stack = QStackedWidget()
+        self.toolbar_stack.addWidget(self.table_toolbar)
+        self.toolbar_stack.addWidget(self.dashboard_toolbar)
+        layout.addWidget(self.toolbar_stack)
+
+        if self._dashboard_store.last_load_warning:
+            QMessageBox.warning(
+                self,
+                "Snapshot explorer",
+                self._dashboard_store.last_load_warning,
+            )
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -215,7 +269,7 @@ class SnapshotExplorer(QWidget):
         )
         table_layout.addWidget(self.table)
         self.views.addWidget(table_page)
-        self.dashboard = DashboardView()
+        self.dashboard = UserDashboardWorkspace()
         self.views.addWidget(self.dashboard)
         layout.addWidget(self.views, 1)
 
@@ -242,6 +296,17 @@ class SnapshotExplorer(QWidget):
         self.clear_button.clicked.connect(self.clear_filters)
         self.export_view_button.clicked.connect(self.export_view)
         self.export_selection_button.clicked.connect(self.export_selection)
+        self.save_as_dashboard_button.clicked.connect(self._save_current_view_as_dashboard)
+        self.new_dashboard_button.clicked.connect(self._create_user_dashboard)
+        self.import_dashboards_button.clicked.connect(self._import_user_dashboards)
+        self.export_dashboards_button.clicked.connect(self._export_user_dashboard_definitions)
+        self.reset_dashboards_button.clicked.connect(self._reset_user_dashboards)
+        self.dashboard.open_requested.connect(self._open_user_dashboard)
+        self.dashboard.edit_requested.connect(self._edit_user_dashboard)
+        self.dashboard.duplicate_requested.connect(self._duplicate_user_dashboard)
+        self.dashboard.delete_requested.connect(self._delete_user_dashboard)
+        self.dashboard.export_requested.connect(self._export_user_dashboard_csv)
+        self.dashboard.new_requested.connect(self._create_user_dashboard)
         self._bound_selection_model: QItemSelectionModel | None = None
         self.proxy.modelReset.connect(self._on_proxy_model_reset)
         self._bind_selection_model()
@@ -259,11 +324,13 @@ class SnapshotExplorer(QWidget):
         self._family = family
         policy_mode = is_configuration_policy_family(family)
         self.dashboard_button.setVisible(not policy_mode)
+        self.dashboard_toolbar.setVisible(not policy_mode)
         self.filter_button.setVisible(not policy_mode)
         self.search_mode.setVisible(not policy_mode)
         self.search.setVisible(not policy_mode)
         self.export_view_button.setVisible(not policy_mode)
         self.export_selection_button.setVisible(not policy_mode)
+        self.save_as_dashboard_button.setVisible(not policy_mode)
         self.open_policy_button.setVisible(policy_mode)
         if policy_mode:
             self.table_button.setText("▦  Policy snapshot")
@@ -271,6 +338,8 @@ class SnapshotExplorer(QWidget):
             self.show_view(0)
         else:
             self.table_button.setText("▦  Table")
+        self._refresh_user_dashboards()
+        self._update_dashboard_actions_enabled()
         self._update_export_buttons()
 
     def _export_enabled(self) -> bool:
@@ -400,7 +469,9 @@ class SnapshotExplorer(QWidget):
             self.status.setText("No snapshots available for this family")
             self.loaded_path = None
             self._last_snapshot_was_large = False
+        self._refresh_user_dashboards()
         self._update_export_buttons()
+        self._update_dashboard_actions_enabled()
 
     def activate(self):
         snapshot = self.snapshot_combo.currentData()
@@ -423,6 +494,8 @@ class SnapshotExplorer(QWidget):
         self.views.setCurrentIndex(index)
         self.table_button.setChecked(index == 0)
         self.dashboard_button.setChecked(index == 1)
+        self.toolbar_stack.setCurrentIndex(index)
+        self._update_dashboard_actions_enabled()
 
     def load_selected(self, _index: int | None = None):
         snapshot = self.snapshot_combo.currentData()
@@ -491,7 +564,8 @@ class SnapshotExplorer(QWidget):
                 sort_order = Qt.SortOrder.AscendingOrder
             self.table.sortByColumn(sort_column, sort_order)
         self._last_snapshot_was_large = large_snapshot
-        self.dashboard.build_dashboard(title or "Snapshot Dashboard", stats or [])
+        self.dashboard.build_builtin_dashboard(title or "Snapshot Dashboard", stats or [])
+        self._refresh_user_dashboards()
         self.progress.hide()
         self.snapshot_combo.setEnabled(True)
         self.filter_button.setEnabled(bool(headers))
@@ -500,6 +574,7 @@ class SnapshotExplorer(QWidget):
             f"{len(rows):,} rows · {len(headers):,} columns · {snapshot.path.name}"
         )
         self._update_export_buttons()
+        self._update_dashboard_actions_enabled()
 
     def _policy_snapshot_loaded(self, generation: int, snapshot: ReportSnapshot, payload):
         if generation != self._generation:
@@ -516,7 +591,7 @@ class SnapshotExplorer(QWidget):
         self.status.setText(
             f"Policy bundle · {len(policy_rows)} policies · {snapshot.path.name}"
         )
-        self.dashboard.build_dashboard("Policy snapshot", stats or [])
+        self.dashboard.build_builtin_dashboard("Policy snapshot", stats or [])
         self._update_export_buttons()
 
     def _emit_open_configuration_policies(self):
@@ -562,6 +637,7 @@ class SnapshotExplorer(QWidget):
             for index, header in enumerate(self.model.headers)
             if header.strip().casefold() in candidates
         ]
+        self._smart_search_columns = columns
         self.proxy.set_smart_search_columns(columns)
 
     def _apply_search(self):
@@ -731,3 +807,308 @@ class SnapshotExplorer(QWidget):
             f"{self.model.columnCount():,} columns · {name}"
         )
         self._update_export_selection_state()
+
+    def _user_dashboards_enabled(self) -> bool:
+        return (
+            not is_configuration_policy_family(self._family)
+            and bool(self._family)
+        )
+
+    def _update_dashboard_actions_enabled(self) -> None:
+        enabled = self._user_dashboards_enabled()
+        model_ready = self.model.rowCount() > 0
+        self.new_dashboard_button.setEnabled(enabled and model_ready)
+        self.save_as_dashboard_button.setEnabled(enabled and model_ready)
+        self.import_dashboards_button.setEnabled(enabled)
+        self.export_dashboards_button.setEnabled(enabled)
+        self.reset_dashboards_button.setEnabled(enabled)
+
+    def _refresh_user_dashboards(self) -> None:
+        if not self._user_dashboards_enabled():
+            self.dashboard.set_dashboards([], self.model.headers)
+            return
+        dashboards = self._dashboard_store.for_family(self._family)
+        self.dashboard.set_dashboards(dashboards, self.model.headers)
+
+    def _named_filters_from_runtime(self) -> dict[int, dict]:
+        if self._filters:
+            return {
+                int(column): {
+                    "allowed": set(data.get("allowed", set())),
+                    "allow_empty": bool(data.get("allow_empty", False)),
+                }
+                for column, data in self._filters.items()
+            }
+        return {
+            int(column): {
+                "allowed": set(data.get("allowed", set())),
+                "allow_empty": bool(data.get("allow_empty", False)),
+            }
+            for column, data in self.proxy.column_filter_map().items()
+        }
+
+    def _apply_user_dashboard(self, dashboard: UserDashboard) -> bool:
+        missing = validate_dashboard_columns(dashboard, self.model.headers)
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Custom dashboard",
+                "This dashboard needs attention before it can be opened.\n"
+                f"Missing columns: {', '.join(missing)}",
+            )
+            return False
+        self.clear_filters()
+        configure_proxy_for_dashboard(
+            self.proxy,
+            self.model,
+            dashboard,
+            smart_search_columns=self._smart_search_columns,
+        )
+        self._filters = named_filters_to_index(dashboard.filters, self.model.headers)
+        self.search_mode.blockSignals(True)
+        self.search.blockSignals(True)
+        search_index = self.search_mode.findData(dashboard.search_mode)
+        if search_index >= 0:
+            self.search_mode.setCurrentIndex(search_index)
+        self.search.setText(dashboard.search_text)
+        self.search_mode.blockSignals(False)
+        self.search.blockSignals(False)
+        if dashboard.sort and dashboard.sort.column:
+            column = self._column(dashboard.sort.column)
+            if column is not None:
+                order = (
+                    Qt.SortOrder.AscendingOrder
+                    if dashboard.sort.order == "asc"
+                    else Qt.SortOrder.DescendingOrder
+                )
+                self.table.setSortingEnabled(True)
+                self.table.sortByColumn(column, order)
+        self.table.clearSelection()
+        self.show_view(0)
+        self._update_status()
+        return True
+
+    def _create_user_dashboard(self) -> None:
+        if not self._user_dashboards_enabled() or not self.model.rowCount():
+            return
+        dialog = UserDashboardEditorDialog(
+            self,
+            model=self.model,
+            family=self._family,
+            title="New custom dashboard",
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.dashboard is None:
+            return
+        self._dashboard_store.create(dialog.dashboard)
+        self._refresh_user_dashboards()
+        self.status.setText(f"Saved custom dashboard “{dialog.dashboard.name}”")
+
+    def _save_current_view_as_dashboard(self) -> None:
+        if not self._user_dashboards_enabled() or not self.model.rowCount():
+            return
+        header = self.table.horizontalHeader()
+        draft, notice = capture_current_view(
+            family=self._family,
+            headers=self.model.headers,
+            filters=self._named_filters_from_runtime(),
+            search_mode=str(self.search_mode.currentData() or "smart"),
+            search_text=self.search.text(),
+            sort_column=header.sortIndicatorSection(),
+            sort_order=header.sortIndicatorOrder(),
+            has_fixed_row_filter=self.proxy.has_fixed_row_filter(),
+        )
+        if draft is None:
+            QMessageBox.warning(self, "Save as dashboard", notice)
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Save as dashboard",
+            "Dashboard name:",
+        )
+        if not ok or not name.strip():
+            return
+        description, ok = QInputDialog.getMultiLineText(
+            self,
+            "Save as dashboard",
+            "Description:",
+        )
+        if not ok:
+            return
+        draft.name = name.strip()
+        draft.description = description.strip()
+        self._dashboard_store.create(draft)
+        self._refresh_user_dashboards()
+        if notice:
+            QMessageBox.information(self, "Save as dashboard", notice)
+        self.status.setText(f'Dashboard "{draft.name}" saved')
+
+    def _edit_user_dashboard(self, dashboard_id: str) -> None:
+        dashboard = self._dashboard_store.get(dashboard_id)
+        if dashboard is None or not self.model.rowCount():
+            return
+        dialog = UserDashboardEditorDialog(
+            self,
+            model=self.model,
+            family=self._family,
+            dashboard=dashboard,
+            title="Edit custom dashboard",
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.dashboard is None:
+            return
+        updated = dialog.dashboard
+        updated.id = dashboard.id
+        updated.created_at = dashboard.created_at
+        self._dashboard_store.update(updated)
+        self._refresh_user_dashboards()
+
+    def _open_user_dashboard(self, dashboard_id: str) -> None:
+        dashboard = self._dashboard_store.get(dashboard_id)
+        if dashboard is None:
+            return
+        self._apply_user_dashboard(dashboard)
+
+    def _duplicate_user_dashboard(self, dashboard_id: str) -> None:
+        try:
+            copy = self._dashboard_store.duplicate(dashboard_id)
+        except KeyError:
+            return
+        self._refresh_user_dashboards()
+        self.status.setText(f"Duplicated dashboard as “{copy.name}”")
+
+    def _delete_user_dashboard(self, dashboard_id: str) -> None:
+        dashboard = self._dashboard_store.get(dashboard_id)
+        if dashboard is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete custom dashboard",
+            f'Delete "{dashboard.name}"?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._dashboard_store.delete(dashboard_id)
+        self._refresh_user_dashboards()
+
+    def _export_user_dashboard_csv(self, dashboard_id: str) -> None:
+        dashboard = self._dashboard_store.get(dashboard_id)
+        if dashboard is None or not self._export_enabled():
+            return
+        rows, missing = dashboard_source_rows(
+            self.model,
+            dashboard,
+            smart_search_columns=self._smart_search_columns,
+        )
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Export dashboard",
+                "This dashboard is incompatible with the current snapshot.\n"
+                f"Missing columns: {', '.join(missing)}",
+            )
+            return
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Export dashboard",
+                "This dashboard matches no rows in the current snapshot.",
+            )
+            return
+        default_name = dashboard_export_filename(self.loaded_path, dashboard.name)
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "Export dashboard rows",
+            default_name,
+            "CSV files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            write_csv_export(
+                Path(path),
+                self.model.headers,
+                rows,
+                delimiter=self.model.delimiter,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Export dashboard", f"Export failed: {exc}")
+            return
+        self.status.setText(
+            f"Exported {len(rows):,} dashboard rows to {Path(path).name}"
+        )
+
+    def _export_user_dashboard_definitions(self) -> None:
+        if not self._user_dashboards_enabled():
+            return
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "Export custom dashboard definitions",
+            "diffasaurus-user-dashboards.json",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        payload = self._dashboard_store.export_definitions()
+        try:
+            Path(path).write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Export dashboard definitions",
+                f"Export failed: {exc}",
+            )
+
+    def _import_user_dashboards(self) -> None:
+        if not self._user_dashboards_enabled():
+            return
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            "Import custom dashboard definitions",
+            "",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self,
+                "Import dashboard definitions",
+                f"Could not read dashboard definitions: {exc}",
+            )
+            return
+        try:
+            imported = self._dashboard_store.import_definitions(payload)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "Import dashboard definitions",
+                str(exc),
+            )
+            return
+        self._refresh_user_dashboards()
+        QMessageBox.information(
+            self,
+            "Import dashboard definitions",
+            f"Imported {len(imported):,} custom dashboard{'s' if len(imported) != 1 else ''}.",
+        )
+
+    def _reset_user_dashboards(self) -> None:
+        if not self._user_dashboards_enabled():
+            return
+        answer = QMessageBox.question(
+            self,
+            "Reset my dashboards",
+            "Delete all custom dashboards?\nBuilt-in dashboards will not be affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._dashboard_store.reset()
+        self._refresh_user_dashboards()

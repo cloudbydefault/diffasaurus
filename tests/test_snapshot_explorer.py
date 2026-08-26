@@ -11,15 +11,29 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
 
 from diffasaurus.core.dashboard_registry import get_dashboard_definition
 from diffasaurus.core.report_history import ReportSnapshot
+from diffasaurus.core.user_dashboards import (
+    ColumnFilterSpec,
+    SortSpec,
+    UserDashboard,
+    UserDashboardStore,
+)
+from diffasaurus.ui.user_dashboard_filters import (
+    capture_current_view,
+    configure_proxy_for_dashboard,
+)
 from diffasaurus.models.csv_model import CsvTableModel, read_csv_table
 from diffasaurus.models.proxies import CsvFilterProxy
 from diffasaurus.ui.main_window import DiffasaurusWindow
 from diffasaurus.ui.multi_column_filter import collect_distinct_values
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer, load_snapshot_payload, LARGE_SNAPSHOT_ROW_THRESHOLD
+from diffasaurus.ui.user_dashboard_workspace import (
+    UserDashboardCard,
+    user_dashboard_card_menu_stylesheet,
+)
 from diffasaurus.core.configuration_policies.constants import CONFIGURATION_POLICY_FAMILY
 
 
@@ -431,7 +445,10 @@ class SnapshotExplorerTests(unittest.TestCase):
                 explorer.set_snapshots([_make_snapshot(path)])
                 explorer.activate()
                 _wait_for_snapshot_load(explorer)
-                self.assertEqual(explorer.dashboard.title.text(), "Identity Dashboard")
+                self.assertEqual(
+                    explorer.dashboard.builtin_view.title.text(),
+                    "Identity Dashboard",
+                )
             finally:
                 _close_explorer(explorer)
 
@@ -1002,10 +1019,482 @@ class SnapshotExplorerTests(unittest.TestCase):
             explorer.set_family(CONFIGURATION_POLICY_FAMILY)
             self.assertFalse(explorer.export_view_button.isVisible())
             self.assertFalse(explorer.export_selection_button.isVisible())
+            self.assertFalse(explorer.save_as_dashboard_button.isVisible())
             self.assertFalse(explorer.export_view_button.isEnabled())
             self.assertFalse(explorer.export_selection_button.isEnabled())
+            self.assertFalse(explorer.save_as_dashboard_button.isEnabled())
+            self.assertFalse(explorer.dashboard_toolbar.isVisible())
+            self.assertFalse(explorer.new_dashboard_button.isEnabled())
         finally:
             _close_explorer(explorer)
+
+    def test_toolbars_switch_with_table_and_dashboard_views(self):
+        explorer = SnapshotExplorer()
+        try:
+            self.assertEqual(explorer.toolbar_stack.currentIndex(), 0)
+            explorer.show_view(1)
+            self.assertEqual(explorer.toolbar_stack.currentIndex(), 1)
+            explorer.show_view(0)
+            self.assertEqual(explorer.toolbar_stack.currentIndex(), 0)
+        finally:
+            _close_explorer(explorer)
+
+    def _toolbar_button_texts(self, toolbar) -> list[str]:
+        return [button.text() for button in toolbar.findChildren(QPushButton)]
+
+    def test_table_toolbar_includes_save_as_dashboard(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.show_view(0)
+            self.assertIn(
+                "Save as dashboard",
+                self._toolbar_button_texts(explorer.table_toolbar),
+            )
+            self.assertEqual(
+                explorer.save_as_dashboard_button.parentWidget(),
+                explorer.table_toolbar,
+            )
+        finally:
+            _close_explorer(explorer)
+
+    def test_dashboard_toolbar_excludes_save_as_dashboard(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.show_view(1)
+            texts = self._toolbar_button_texts(explorer.dashboard_toolbar)
+            self.assertNotIn("Save as dashboard", texts)
+            self.assertNotIn("Save current view", texts)
+            self.assertEqual(
+                texts,
+                [
+                    "+ New dashboard",
+                    "Import",
+                    "Export definitions",
+                    "Reset my dashboards",
+                ],
+            )
+        finally:
+            _close_explorer(explorer)
+
+    def test_my_dashboards_empty_state_has_no_duplicate_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "config" / "user_dashboards.json"
+            explorer = SnapshotExplorer()
+            try:
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer.set_family("TestFamily")
+                explorer.model.set_table(["Name"], [["Alice"]])
+                explorer._refresh_user_dashboards()
+                explorer.show_view(1)
+                explorer.dashboard.tabs.setCurrentIndex(1)
+                explorer.show()
+                QApplication.processEvents()
+                self.assertEqual(explorer.dashboard.grid.count(), 0)
+                self.assertTrue(explorer.dashboard.empty_label.isVisible())
+                self.assertFalse(hasattr(explorer.dashboard, "empty_save_button"))
+                self.assertFalse(hasattr(explorer.dashboard, "empty_new_button"))
+            finally:
+                _close_explorer(explorer)
+
+    def test_save_as_dashboard_captures_view_and_lists_in_my_dashboards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "config" / "user_dashboards.json"
+            explorer = SnapshotExplorer()
+            try:
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer.set_family("TestFamily")
+                explorer.model.set_table(
+                    ["DisplayName", "AccountEnabled"],
+                    [["Adele", "True"], ["Alex", "False"]],
+                )
+                explorer.proxy.set_column_allowed_values(1, {"False"})
+                explorer.search.setText("alex")
+                explorer._apply_search()
+                explorer.show_view(0)
+                with (
+                    patch(
+                        "diffasaurus.ui.snapshot_explorer.QInputDialog.getText",
+                        return_value=("Disabled users", True),
+                    ),
+                    patch(
+                        "diffasaurus.ui.snapshot_explorer.QInputDialog.getMultiLineText",
+                        return_value=("", True),
+                    ),
+                ):
+                    explorer._save_current_view_as_dashboard()
+                saved = explorer._dashboard_store.for_family("TestFamily")
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0].name, "Disabled users")
+                self.assertEqual(saved[0].filters[0].column, "AccountEnabled")
+                self.assertEqual(saved[0].search_text, "alex")
+                explorer._refresh_user_dashboards()
+                self.assertEqual(explorer.dashboard.grid.count(), 1)
+                self.assertEqual(explorer.views.currentIndex(), 0)
+                self.assertIn('Dashboard "Disabled users" saved', explorer.status.text())
+            finally:
+                _close_explorer(explorer)
+
+    def test_user_dashboard_card_menu_actions_and_style(self):
+        dashboard = UserDashboard(id="dash-1", name="Sample", family="TestFamily")
+        card = UserDashboardCard(dashboard, missing_columns=[])
+        try:
+            self.assertEqual(
+                card.menu_action_texts(),
+                ["Open", "Edit", "Duplicate", "Export CSV", "Delete"],
+            )
+            stylesheet = card.action_menu.styleSheet()
+            self.assertIn("#121f2b", stylesheet)
+            self.assertIn("border: 1px solid", stylesheet)
+            self.assertEqual(
+                card.action_menu.styleSheet(),
+                user_dashboard_card_menu_stylesheet(),
+            )
+            self.assertIn("color: #f87171", card.action_menu.styleSheet())
+        finally:
+            card.deleteLater()
+            _drain_qt()
+
+    def test_user_dashboard_card_menu_signals_dispatch(self):
+        dashboard = UserDashboard(id="dash-1", name="Sample", family="TestFamily")
+        card = UserDashboardCard(dashboard, missing_columns=[])
+        try:
+            received: list[tuple[str, str]] = []
+
+            def capture(action: str, dashboard_id: str) -> None:
+                received.append((action, dashboard_id))
+
+            card.open_requested.connect(lambda dashboard_id: capture("open", dashboard_id))
+            card.edit_requested.connect(lambda dashboard_id: capture("edit", dashboard_id))
+            card.duplicate_requested.connect(
+                lambda dashboard_id: capture("duplicate", dashboard_id)
+            )
+            card.export_requested.connect(
+                lambda dashboard_id: capture("export", dashboard_id)
+            )
+            card.delete_requested.connect(
+                lambda dashboard_id: capture("delete", dashboard_id)
+            )
+            card._open_action.trigger()
+            card._edit_action.trigger()
+            card._duplicate_action.trigger()
+            card._export_action.trigger()
+            card._delete_action.trigger()
+            self.assertEqual(
+                received,
+                [
+                    ("open", "dash-1"),
+                    ("edit", "dash-1"),
+                    ("duplicate", "dash-1"),
+                    ("export", "dash-1"),
+                    ("delete", "dash-1"),
+                ],
+            )
+        finally:
+            card.deleteLater()
+            _drain_qt()
+
+    def test_table_filters_persist_when_switching_to_dashboard(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.model.set_table(
+                ["Name", "State"],
+                [["Alice", "Enabled"], ["Bob", "Disabled"]],
+            )
+            explorer.proxy.set_column_allowed_values(1, {"Disabled"})
+            explorer.search.setText("bob")
+            explorer._apply_search()
+            explorer.show_view(1)
+            explorer.show_view(0)
+            self.assertEqual(explorer.proxy.active_filter_count(), 1)
+            self.assertEqual(explorer.search.text(), "bob")
+            self.assertEqual(explorer.proxy.rowCount(), 1)
+        finally:
+            _close_explorer(explorer)
+
+    def test_user_dashboard_store_survives_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "config" / "user_dashboards.json"
+            explorer = SnapshotExplorer()
+            try:
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer.set_family("Entra_Users_Properties")
+                explorer.model.set_table(
+                    ["DisplayName", "AccountEnabled"],
+                    [["Adele", "True"], ["Alex", "False"]],
+                )
+                explorer._dashboard_store.create(
+                    UserDashboard(
+                        id="dash-1",
+                        name="Disabled only",
+                        family="Entra_Users_Properties",
+                        filters=[
+                            ColumnFilterSpec(
+                                column="AccountEnabled",
+                                allowed=["False"],
+                            )
+                        ],
+                    )
+                )
+                reloaded = UserDashboardStore(store_path)
+                self.assertEqual(len(reloaded.for_family("Entra_Users_Properties")), 1)
+            finally:
+                _close_explorer(explorer)
+
+    def test_user_dashboard_family_scoping_in_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "config" / "user_dashboards.json"
+            explorer = SnapshotExplorer()
+            try:
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer._dashboard_store.create(
+                    UserDashboard(id="1", name="Users view", family="Users")
+                )
+                explorer._dashboard_store.create(
+                    UserDashboard(id="2", name="Groups view", family="Groups")
+                )
+                explorer.set_family("Users")
+                explorer.model.set_table(["Name"], [["Alice"]])
+                explorer._refresh_user_dashboards()
+                self.assertEqual(explorer.dashboard.grid.count(), 1)
+                explorer.set_family("Groups")
+                explorer._refresh_user_dashboards()
+                self.assertEqual(explorer.dashboard.grid.count(), 1)
+            finally:
+                _close_explorer(explorer)
+
+    def test_apply_user_dashboard_reproduces_table_view(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "config" / "user_dashboards.json"
+            explorer = SnapshotExplorer()
+            try:
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer.set_family("TestFamily")
+                explorer.model.set_table(
+                    ["DisplayName", "AccountEnabled", "UserType"],
+                    [
+                        ["Adele", "True", "Member"],
+                        ["Alex", "False", "Guest"],
+                        ["Allan", "True", "Member"],
+                    ],
+                )
+                explorer.proxy.set_column_allowed_values(1, {"False"})
+                explorer.search.setText("alex")
+                explorer._apply_search()
+                header = explorer.table.horizontalHeader()
+                explorer.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                draft, _notice = capture_current_view(
+                    family="TestFamily",
+                    headers=explorer.model.headers,
+                    filters=explorer.proxy.column_filter_map(),
+                    search_mode="smart",
+                    search_text=explorer.search.text(),
+                    sort_column=header.sortIndicatorSection(),
+                    sort_order=header.sortIndicatorOrder(),
+                    has_fixed_row_filter=False,
+                )
+                draft.name = "Manual snapshot"
+                saved = explorer._dashboard_store.create(draft)
+                explorer.clear_filters()
+                self.assertEqual(explorer.proxy.rowCount(), 3)
+
+                manual = SnapshotExplorer()
+                try:
+                    manual.set_family("TestFamily")
+                    manual.model.set_table(
+                        list(explorer.model.headers),
+                        [list(row) for row in explorer.model._rows],
+                    )
+                    manual._apply_user_dashboard(saved)
+                    self.assertEqual(manual.proxy.rowCount(), 1)
+                    self.assertEqual(
+                        manual.proxy.data(manual.proxy.index(0, 0)),
+                        "Alex",
+                    )
+                    self.assertEqual(manual.search.text(), "alex")
+                finally:
+                    _close_explorer(manual)
+            finally:
+                _close_explorer(explorer)
+
+    def test_incompatible_user_dashboard_preserves_live_table_state(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.set_family("TestFamily")
+            explorer.model.set_table(
+                ["DisplayName", "AccountEnabled", "UserType"],
+                [
+                    ["Adele", "True", "Member"],
+                    ["Alex", "False", "Guest"],
+                    ["Allan", "True", "Member"],
+                ],
+            )
+            explorer.proxy.set_column_allowed_values(1, {"False"})
+            explorer.search_mode.setCurrentIndex(1)
+            explorer.search.setText("alex")
+            explorer._apply_search()
+            explorer.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+            explorer.show_view(0)
+            header = explorer.table.horizontalHeader()
+            before = {
+                "rows": explorer.proxy.rowCount(),
+                "filters": explorer.proxy.column_filter_map(),
+                "search": explorer.search.text(),
+                "mode": explorer.search_mode.currentData(),
+                "sort_column": header.sortIndicatorSection(),
+                "sort_order": header.sortIndicatorOrder(),
+                "view": explorer.views.currentIndex(),
+            }
+            dashboard = UserDashboard(
+                id="dash-1",
+                name="Missing column",
+                family="TestFamily",
+                filters=[ColumnFilterSpec(column="Department", allowed=["Sales"])],
+                search_mode="all",
+                search_text="ignored",
+                sort=SortSpec(column="DeviceName", order="desc"),
+            )
+            with patch(
+                "diffasaurus.ui.snapshot_explorer.QMessageBox.warning",
+                return_value=QMessageBox.StandardButton.Ok,
+            ):
+                applied = explorer._apply_user_dashboard(dashboard)
+            self.assertFalse(applied)
+            self.assertEqual(explorer.proxy.rowCount(), before["rows"])
+            self.assertEqual(explorer.proxy.column_filter_map(), before["filters"])
+            self.assertEqual(explorer.search.text(), before["search"])
+            self.assertEqual(explorer.search_mode.currentData(), before["mode"])
+            self.assertEqual(header.sortIndicatorSection(), before["sort_column"])
+            self.assertEqual(header.sortIndicatorOrder(), before["sort_order"])
+            self.assertEqual(explorer.views.currentIndex(), before["view"])
+        finally:
+            _close_explorer(explorer)
+
+    def test_incompatible_dashboard_missing_sort_column_preserves_state(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.set_family("TestFamily")
+            explorer.model.set_table(
+                ["DisplayName", "AccountEnabled"],
+                [["Adele", "True"], ["Alex", "False"]],
+            )
+            explorer.search.setText("adele")
+            explorer._apply_search()
+            before_rows = explorer.proxy.rowCount()
+            before_search = explorer.search.text()
+            dashboard = UserDashboard(
+                id="dash-1",
+                name="Missing sort",
+                family="TestFamily",
+                filters=[ColumnFilterSpec(column="AccountEnabled", allowed=["True"])],
+                sort=SortSpec(column="MissingSortColumn", order="asc"),
+            )
+            with patch(
+                "diffasaurus.ui.snapshot_explorer.QMessageBox.warning",
+                return_value=QMessageBox.StandardButton.Ok,
+            ):
+                self.assertFalse(explorer._apply_user_dashboard(dashboard))
+            self.assertEqual(explorer.proxy.rowCount(), before_rows)
+            self.assertEqual(explorer.search.text(), before_search)
+            self.assertEqual(explorer.proxy.column_filter_map(), {})
+        finally:
+            _close_explorer(explorer)
+
+    def test_incompatible_dashboard_missing_one_filter_column_preserves_state(self):
+        explorer = SnapshotExplorer()
+        try:
+            explorer.set_family("TestFamily")
+            explorer.model.set_table(
+                ["DisplayName", "AccountEnabled", "UserType"],
+                [
+                    ["Adele", "True", "Member"],
+                    ["Alex", "False", "Guest"],
+                ],
+            )
+            explorer.proxy.set_column_allowed_values(2, {"Guest"})
+            explorer.search.setText("alex")
+            explorer._apply_search()
+            before = {
+                "rows": explorer.proxy.rowCount(),
+                "filters": explorer.proxy.column_filter_map(),
+                "search": explorer.search.text(),
+            }
+            dashboard = UserDashboard(
+                id="dash-1",
+                name="One missing filter column",
+                family="TestFamily",
+                filters=[
+                    ColumnFilterSpec(column="AccountEnabled", allowed=["False"]),
+                    ColumnFilterSpec(column="Department", allowed=["Sales"]),
+                ],
+            )
+            with patch(
+                "diffasaurus.ui.snapshot_explorer.QMessageBox.warning",
+                return_value=QMessageBox.StandardButton.Ok,
+            ):
+                self.assertFalse(explorer._apply_user_dashboard(dashboard))
+            self.assertEqual(explorer.proxy.rowCount(), before["rows"])
+            self.assertEqual(explorer.proxy.column_filter_map(), before["filters"])
+            self.assertEqual(explorer.search.text(), before["search"])
+        finally:
+            _close_explorer(explorer)
+
+    def test_user_dashboard_export_csv_matches_filtered_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export_path = Path(directory) / "export.csv"
+            explorer = SnapshotExplorer()
+            try:
+                store_path = Path(directory) / "config" / "user_dashboards.json"
+                explorer._dashboard_store = UserDashboardStore(store_path)
+                explorer.set_family("TestFamily")
+                explorer.loaded_path = Path(directory) / "users.csv"
+                explorer.model.set_table(
+                    ["DisplayName", "AccountEnabled"],
+                    [["Adele", "True"], ["Alex", "False"]],
+                )
+                dashboard = explorer._dashboard_store.create(
+                    UserDashboard(
+                        id="dash-1",
+                        name="Disabled users",
+                        family="TestFamily",
+                        filters=[
+                            ColumnFilterSpec(
+                                column="AccountEnabled",
+                                allowed=["False"],
+                            )
+                        ],
+                    )
+                )
+                with patch(
+                    "diffasaurus.ui.snapshot_explorer.QFileDialog.getSaveFileName",
+                    return_value=(str(export_path), "CSV files (*.csv)"),
+                ):
+                    explorer._export_user_dashboard_csv(dashboard.id)
+                with export_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    exported = list(__import__("csv").reader(handle))
+                self.assertEqual(
+                    exported,
+                    [["DisplayName", "AccountEnabled"], ["Alex", "False"]],
+                )
+            finally:
+                _close_explorer(explorer)
+
+    def test_configure_proxy_for_dashboard_sorts_by_column_name(self):
+        model = CsvTableModel(
+            ["Name", "Rank"],
+            [["Charlie", "3"], ["Alice", "1"], ["Bob", "2"]],
+        )
+        proxy = CsvFilterProxy()
+        proxy.setSourceModel(model)
+        dashboard = UserDashboard(
+            id="dash-1",
+            name="Sorted",
+            family="TestFamily",
+            sort=SortSpec(column="Name", order="asc"),
+        )
+        compatible, missing = configure_proxy_for_dashboard(proxy, model, dashboard)
+        self.assertTrue(compatible)
+        self.assertEqual(missing, [])
+        self.assertEqual(proxy.data(proxy.index(0, 0)), "Alice")
 
     def test_new_snapshot_load_clears_selection_export_state(self):
         with tempfile.TemporaryDirectory() as directory:
