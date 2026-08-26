@@ -92,6 +92,18 @@ class CsvFilterProxy(QSortFilterProxyModel):
     def active_filter_count(self) -> int:
         return len(self._column_filters) + int(self._fixed_rows is not None)
 
+    def has_fixed_row_filter(self) -> bool:
+        return self._fixed_rows is not None
+
+    def column_filter_map(self) -> dict[int, dict[str, object]]:
+        return {
+            column: {
+                "allowed": set(allowed),
+                "allow_empty": allow_empty,
+            }
+            for column, (allowed, allow_empty) in self._column_filters.items()
+        }
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         if self._fixed_rows is not None and source_row not in self._fixed_rows:
             return False
