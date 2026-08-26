@@ -59,6 +59,45 @@ def _tokenize_value(value: str) -> set[str]:
     return {token.casefold() for token in _TOKEN_SPLIT.split(value) if token}
 
 
+def _query_tokens(query: str) -> list[str]:
+    return [token for token in _TOKEN_SPLIT.split(query.strip()) if token]
+
+
+def _fts_prefix_and_query(tokens: list[str]) -> str:
+    parts: list[str] = []
+    for token in tokens:
+        escaped = token.replace('"', '""')
+        parts.append(f'"{escaped}"*')
+    return " AND ".join(parts)
+
+
+def _token_prefix_like_patterns(token: str) -> list[str]:
+    escaped = _escape_like(token.casefold())
+    return [
+        escaped + "%",
+        "% " + escaped + "%",
+        "%." + escaped + "%",
+        "%-" + escaped + "%",
+        "%_" + escaped + "%",
+    ]
+
+
+def _value_matches_token_prefix(value: str, token: str) -> bool:
+    needle = token.casefold()
+    return any(part.startswith(needle) for part in _tokenize_value(value))
+
+
+def _value_matches_any_token_prefix(value: str, tokens: list[str]) -> bool:
+    return any(_value_matches_token_prefix(value, token) for token in tokens)
+
+
+def _record_matches_token(record: EntityRecord, token: str) -> bool:
+    needle = token.casefold()
+    if _rank_record(record, needle) is not None:
+        return True
+    return any(search_token.startswith(needle) for search_token in _search_tokens(record))
+
+
 @contextmanager
 def _connect(db_path: Path, *, readonly: bool = True):
     connection = open_connection(db_path, readonly=readonly)
@@ -104,6 +143,157 @@ class _SearchRank(IntEnum):
     FTS = 7
 
 
+_PRIMARY_ALIAS_KINDS: dict[EntityType, tuple[str, ...]] = {
+    "user": ("upn", "mail", "user_principal_name"),
+    "device": ("device_name", "serial_number", "serial"),
+    "shared_mailbox": ("primary_smtp", "alias"),
+}
+
+
+def _alias_last_seen(row: sqlite3.Row | TimedAlias) -> datetime:
+    if isinstance(row, TimedAlias):
+        return row.last_seen
+    value = row["last_seen"]
+    return _parse_iso(value) or datetime.min
+
+
+def _primary_alias_display(
+    alias_rows: list[sqlite3.Row] | list[TimedAlias],
+    entity_type: EntityType,
+) -> str | None:
+    preferred = _PRIMARY_ALIAS_KINDS.get(entity_type, ())
+    best_by_kind: dict[str, tuple[datetime, str]] = {}
+    fallback: tuple[datetime, str] | None = None
+    for row in alias_rows:
+        kind = row["kind"] if isinstance(row, sqlite3.Row) else row.kind
+        display_value = str(
+            row["display_value"] if isinstance(row, sqlite3.Row) else row.value
+        ).strip()
+        if not display_value:
+            continue
+        last_seen = _alias_last_seen(row)
+        if preferred:
+            if kind in preferred:
+                current = best_by_kind.get(kind)
+                if current is None or last_seen >= current[0]:
+                    best_by_kind[kind] = (last_seen, display_value)
+        elif fallback is None or last_seen >= fallback[0]:
+            fallback = (last_seen, display_value)
+    for kind in preferred:
+        if kind in best_by_kind:
+            return best_by_kind[kind][1]
+    return fallback[1] if fallback else None
+
+
+def _autocomplete_friendly_label(
+    entity_type: EntityType,
+    display_name: str,
+    primary_id: str,
+    alias_rows: list[sqlite3.Row] | list[TimedAlias],
+) -> str:
+    name = display_name.strip()
+    alias = (_primary_alias_display(alias_rows, entity_type) or "").strip()
+    if name and alias and name.casefold() != alias.casefold():
+        return f"{name} · {alias}"
+    if name:
+        return name
+    if alias:
+        return alias
+    return primary_id
+
+
+def autocomplete_friendly_label_for_record(record: EntityRecord) -> str:
+    return _autocomplete_friendly_label(
+        record.key.entity_type,
+        record.display_name,
+        record.key.primary_id,
+        record.aliases,
+    )
+
+
+def _rank_autocomplete_value(value: str, tokens: list[str]) -> _SearchRank | None:
+    if not value or not tokens:
+        return None
+    normalized = " ".join(tokens).casefold()
+    value_cf = value.casefold()
+    if value_cf == normalized:
+        return _SearchRank.EXACT_ALIAS
+    if value_cf.startswith(normalized):
+        return _SearchRank.PREFIX_ALIAS
+    if len(tokens) == 1:
+        token = tokens[0].casefold()
+        if value_cf == token:
+            return _SearchRank.EXACT_ALIAS
+        if value_cf.startswith(token):
+            return _SearchRank.PREFIX_ALIAS
+        for part in _tokenize_value(value):
+            if part.startswith(token):
+                return _SearchRank.TOKEN_PREFIX
+        return None
+    if all(_value_matches_token_prefix(value, token) for token in tokens):
+        return _SearchRank.TOKEN_PREFIX
+    if _value_matches_any_token_prefix(value, tokens):
+        return _SearchRank.TOKEN_PREFIX
+    return None
+
+
+def _best_entity_autocomplete_rank(
+    display_name: str,
+    primary_id: str,
+    alias_rows: list[sqlite3.Row],
+    tokens: list[str],
+) -> _SearchRank:
+    best: _SearchRank | None = None
+    values = [display_name, primary_id]
+    for row in alias_rows:
+        values.append(str(row["display_value"] or ""))
+        values.append(str(row["normalized_value"] or ""))
+    for value in values:
+        if display_name and value == display_name:
+            rank = _rank_autocomplete_value(value, tokens)
+            if rank is not None:
+                if rank > _SearchRank.EXACT_DISPLAY:
+                    rank = _SearchRank.EXACT_DISPLAY
+        elif primary_id and value == primary_id:
+            rank = _rank_autocomplete_value(value, tokens)
+            if rank is not None and rank > _SearchRank.EXACT_ID:
+                rank = _SearchRank.EXACT_ID
+        else:
+            rank = _rank_autocomplete_value(value, tokens)
+        if rank is None:
+            continue
+        if best is None or rank < best:
+            best = rank
+    return best or _SearchRank.FTS
+
+
+def _best_entity_autocomplete_rank_for_record(
+    record: EntityRecord,
+    tokens: list[str],
+) -> _SearchRank:
+    alias_rows = record.aliases
+    best: _SearchRank | None = None
+    values = [record.display_name, record.key.primary_id, *(alias.value for alias in alias_rows)]
+    for value in values:
+        if not value:
+            continue
+        if value == record.display_name:
+            rank = _rank_autocomplete_value(value, tokens)
+            if rank is not None and rank > _SearchRank.EXACT_DISPLAY:
+                rank = _SearchRank.EXACT_DISPLAY
+        elif value == record.key.primary_id:
+            rank = _rank_autocomplete_value(value, tokens)
+            if rank is not None and rank > _SearchRank.EXACT_ID:
+                rank = _SearchRank.EXACT_ID
+        else:
+            rank = _rank_autocomplete_value(value, tokens)
+        if rank is None:
+            continue
+        if best is None or rank < best:
+            best = rank
+    return best or _SearchRank.FTS
+
+
 def _rank_record(record: EntityRecord, normalized: str) -> _SearchRank | None:
     key = record.key.primary_id.casefold()
     if key == normalized:
@@ -137,13 +327,10 @@ def _search_tokens(record: EntityRecord) -> set[str]:
 
 
 def _record_matches_query(record: EntityRecord, normalized: str) -> bool:
-    if _rank_record(record, normalized) is not None:
-        return True
-    key = record.key.primary_id.casefold()
-    display = record.display_name.casefold()
-    if normalized in key or normalized in display:
-        return True
-    return any(normalized in alias.value.casefold() for alias in record.aliases)
+    tokens = _query_tokens(normalized)
+    if not tokens:
+        return False
+    return all(_record_matches_token(record, token) for token in tokens)
 
 
 def _is_ambiguous_search(normalized: str, records: list[EntityRecord]) -> bool:
@@ -377,23 +564,194 @@ class EntityIndexRepository:
         *,
         limit: int = 50,
     ) -> list[str]:
-        needle = _normalize_query(prefix)
-        if not needle:
+        return [
+            display_text
+            for display_text, _ in self.autocomplete_matches(prefix, entity_type, limit=limit)
+        ]
+
+    def autocomplete_matches(
+        self,
+        prefix: str,
+        entity_type: EntityType,
+        *,
+        limit: int = 50,
+    ) -> list[tuple[str, CanonicalEntityKey]]:
+        tokens = _query_tokens(prefix)
+        if not tokens:
             return []
-        pattern = _escape_like(needle) + "%"
         with _connect(self._db_path, readonly=self._readonly) as connection:
+            fetch_limit = max(limit * 4, limit + 10)
+            if self._fts5_enabled:
+                entity_ids = self._fts_entity_ids(
+                    connection,
+                    tokens,
+                    entity_type,
+                    fetch_limit,
+                )
+            else:
+                entity_ids = self._alias_token_entity_ids(connection, tokens, entity_type)[
+                    :fetch_limit
+                ]
+            return self._build_autocomplete_matches(
+                connection,
+                entity_ids,
+                tokens,
+                entity_type,
+                limit,
+            )
+
+    def _fts_entity_ids(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        entity_type: EntityType,
+        limit: int,
+    ) -> list[int]:
+        fts_query = _fts_prefix_and_query(tokens)
+        try:
             rows = connection.execute(
                 """
-                SELECT DISTINCT ea.display_value
+                SELECT entity_id FROM entity_search_fts
+                WHERE entity_search_fts MATCH ? AND entity_type=?
+                LIMIT ?
+                """,
+                (fts_query, entity_type, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return self._alias_token_entity_ids(connection, tokens, entity_type)
+        entity_ids = [int(row["entity_id"]) for row in rows]
+        if entity_ids:
+            return entity_ids
+        return self._alias_token_entity_ids(connection, tokens, entity_type)
+
+    def _entity_ids_for_token(
+        self,
+        connection: sqlite3.Connection,
+        entity_type: EntityType,
+        token: str,
+    ) -> set[int]:
+        ids: set[int] = set()
+        patterns = _token_prefix_like_patterns(token)
+        id_prefix = _escape_like(token.casefold()) + "%"
+        for pattern in patterns:
+            for row in connection.execute(
+                """
+                SELECT id FROM entities
+                WHERE source_id=? AND entity_type=? AND lower(display_name) LIKE ? ESCAPE '\\'
+                """,
+                (self._source_id, entity_type, pattern),
+            ):
+                ids.add(int(row["id"]))
+            for row in connection.execute(
+                """
+                SELECT e.id
                 FROM entity_aliases ea
                 JOIN entities e ON e.id = ea.entity_id
                 WHERE e.source_id=? AND e.entity_type=? AND ea.normalized_value LIKE ? ESCAPE '\\'
-                LIMIT ?
                 """,
-                (self._source_id, entity_type, pattern, limit),
+                (self._source_id, entity_type, pattern),
+            ):
+                ids.add(int(row["id"]))
+        for row in connection.execute(
+            """
+            SELECT id FROM entities
+            WHERE source_id=? AND entity_type=? AND lower(primary_id) LIKE ? ESCAPE '\\'
+            """,
+            (self._source_id, entity_type, id_prefix),
+        ):
+            ids.add(int(row["id"]))
+        return ids
+
+    def _alias_token_entity_ids(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        entity_type: EntityType,
+    ) -> list[int]:
+        entity_ids: set[int] | None = None
+        for token in tokens:
+            token_ids = self._entity_ids_for_token(connection, entity_type, token)
+            entity_ids = token_ids if entity_ids is None else entity_ids & token_ids
+            if not entity_ids:
+                return []
+        return sorted(entity_ids or [])
+
+    def _build_autocomplete_matches(
+        self,
+        connection: sqlite3.Connection,
+        entity_ids: list[int],
+        tokens: list[str],
+        entity_type: EntityType,
+        limit: int,
+    ) -> list[tuple[str, CanonicalEntityKey]]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" * len(entity_ids))
+        rows = connection.execute(
+            f"""
+            SELECT id, primary_id, display_name
+            FROM entities
+            WHERE id IN ({placeholders})
+            ORDER BY lower(display_name), primary_id
+            """,
+            entity_ids,
+        ).fetchall()
+        aggregated: dict[str, tuple[_SearchRank, str, str, CanonicalEntityKey]] = {}
+        for row in rows:
+            key = CanonicalEntityKey(entity_type, row["primary_id"])
+            display_name = str(row["display_name"] or "")
+            alias_rows = connection.execute(
+                """
+                SELECT kind, display_value, normalized_value, first_seen, last_seen
+                FROM entity_aliases
+                WHERE entity_id=?
+                ORDER BY last_seen DESC, lower(display_value)
+                """,
+                (int(row["id"]),),
             ).fetchall()
-        suggestions = {row["display_value"] for row in rows}
-        return sorted(suggestions, key=str.casefold)[:limit]
+            rank = _best_entity_autocomplete_rank(
+                display_name,
+                str(row["primary_id"]),
+                alias_rows,
+                tokens,
+            )
+            friendly = _autocomplete_friendly_label(
+                entity_type,
+                display_name,
+                str(row["primary_id"]),
+                alias_rows,
+            )
+            aggregated[key.label()] = (rank, friendly.casefold(), friendly, key)
+        ordered = sorted(
+            aggregated.values(),
+            key=lambda item: (item[0], item[1], item[3].primary_id),
+        )
+        return [(friendly, key) for _, _, friendly, key in ordered[:limit]]
+
+    def _add_token_search_candidates(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        entity_type: EntityType,
+        ranked: dict[str, tuple[_SearchRank, str]],
+        limit: int,
+    ) -> None:
+        for entity_id in self._alias_token_entity_ids(connection, tokens, entity_type):
+            entity_row = connection.execute(
+                "SELECT primary_id, display_name FROM entities WHERE id=?",
+                (entity_id,),
+            ).fetchone()
+            if entity_row is None:
+                continue
+            label = f"{entity_type}:{entity_row['primary_id']}"
+            self._note_candidate(
+                ranked,
+                label,
+                _SearchRank.TOKEN_PREFIX,
+                entity_row["display_name"].casefold(),
+            )
+            if len(ranked) >= limit * 4:
+                break
 
     def _load_entity_by_id(
         self,
@@ -577,9 +935,10 @@ class EntityIndexRepository:
                     row["display_name"].casefold(),
                 )
 
-            if self._fts5_enabled:
-                fts_term = normalized.replace('"', '""')
-                fts_query = f'"{fts_term}"*'
+            search_tokens = _query_tokens(normalized)
+            if self._fts5_enabled and search_tokens:
+                fts_query = _fts_prefix_and_query(search_tokens)
+                fts_failed = False
                 try:
                     for row in connection.execute(
                         """
@@ -603,7 +962,23 @@ class EntityIndexRepository:
                             entity_row["display_name"].casefold(),
                         )
                 except sqlite3.OperationalError:
-                    pass
+                    fts_failed = True
+                if fts_failed and search_tokens:
+                    self._add_token_search_candidates(
+                        connection,
+                        search_tokens,
+                        entity_type,
+                        ranked,
+                        limit,
+                    )
+            elif search_tokens:
+                self._add_token_search_candidates(
+                    connection,
+                    search_tokens,
+                    entity_type,
+                    ranked,
+                    limit,
+                )
 
             records: list[EntityRecord] = []
             ordered_labels = sorted(

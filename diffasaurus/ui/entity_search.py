@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QStringListModel, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QComboBox,
     QCompleter,
@@ -12,7 +13,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from diffasaurus.core.entity.index_repository import EntityIndexRepository
+from diffasaurus.core.entity.index_repository import (
+    EntityIndexRepository,
+    _best_entity_autocomplete_rank_for_record,
+    _query_tokens,
+    _record_matches_token,
+    autocomplete_friendly_label_for_record,
+)
 from diffasaurus.core.entity.resolution import EntityResolver, SearchResult
 from diffasaurus.core.entity.types import CanonicalEntityKey, EntityRecord, EntityType
 
@@ -37,6 +44,7 @@ class EntitySelectorPanel(QWidget):
         self._resolver: EntityResolver | None = None
         self._repository: EntityIndexRepository | None = None
         self._selected: EntityRecord | None = None
+        self._committing_completer_selection = False
         self._autocomplete_timer = QTimer(self)
         self._autocomplete_timer.setSingleShot(True)
         self._autocomplete_timer.timeout.connect(self._update_completer)
@@ -66,9 +74,10 @@ class EntitySelectorPanel(QWidget):
         search_label.setObjectName("fieldLabel")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("ID, UPN, device name, serial, SMTP address…")
-        self._completer_model = QStringListModel()
+        self._completer_model = QStandardItemModel()
         self._completer = QCompleter(self._completer_model)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
         self.search_input.setCompleter(self._completer)
         search_row.addWidget(search_label)
         search_row.addWidget(self.search_input)
@@ -91,6 +100,7 @@ class EntitySelectorPanel(QWidget):
         self.type_combo.currentIndexChanged.connect(self._entity_type_changed)
         self.search_input.returnPressed.connect(self._run_search)
         self.search_input.textChanged.connect(self._on_search_text_changed)
+        self._completer.activated.connect(self._on_completer_activated)
         self.disambiguation.itemClicked.connect(self._pick_disambiguation)
         self.disambiguation.itemDoubleClicked.connect(self._pick_disambiguation)
 
@@ -137,7 +147,7 @@ class EntitySelectorPanel(QWidget):
     def clear_index_state(self) -> None:
         self._selected = None
         self._autocomplete_timer.stop()
-        self._completer_model.setStringList([])
+        self._completer_model.clear()
         self.disambiguation.hide()
         self.status_label.hide()
 
@@ -154,7 +164,7 @@ class EntitySelectorPanel(QWidget):
         self._repository = None
         self._resolver = None
         self._selected = None
-        self._completer_model.setStringList([])
+        self._completer_model.clear()
         self.disambiguation.hide()
         self.status_label.setText(f"Entity index failed: {message}")
         self.status_label.show()
@@ -185,7 +195,7 @@ class EntitySelectorPanel(QWidget):
         self._selected = None
         self.disambiguation.hide()
         self._autocomplete_timer.stop()
-        self._completer_model.setStringList([])
+        self._completer_model.clear()
         self.status_label.hide()
         self.search_input.clear()
         self.selection_cleared.emit()
@@ -194,9 +204,13 @@ class EntitySelectorPanel(QWidget):
     def _on_search_text_changed(self, text: str) -> None:
         self._autocomplete_timer.stop()
         if not text.strip():
-            self._completer_model.setStringList([])
+            self._completer_model.clear()
         else:
             self._autocomplete_timer.start(AUTOCOMPLETE_DEBOUNCE_MS)
+        if self._committing_completer_selection:
+            return
+        if self._selected is not None and self._text_represents_selected_entity(text):
+            return
         if self._selected is not None or self.disambiguation.isVisible():
             self._selected = None
             self.disambiguation.hide()
@@ -212,28 +226,77 @@ class EntitySelectorPanel(QWidget):
         prefix = self.search_input.text().strip()
         if self._repository is not None:
             if prefix:
-                suggestions = self._repository.autocomplete_prefix(prefix, self.current_entity_type())
+                matches = self._repository.autocomplete_matches(prefix, self.current_entity_type())
             else:
-                suggestions = []
-            self._completer_model.setStringList(suggestions)
+                matches = []
+            self._set_completer_matches(matches)
             return
         if not self._resolver:
-            self._completer_model.setStringList([])
+            self._completer_model.clear()
             return
         entity_type = self.current_entity_type()
         if not prefix:
-            self._completer_model.setStringList([])
+            self._completer_model.clear()
             return
-        needle = prefix.casefold()
-        suggestions: list[str] = []
+        tokens = _query_tokens(prefix)
+        if not tokens:
+            self._completer_model.clear()
+            return
+        matches: list[tuple[str, CanonicalEntityKey]] = []
+        aggregated: dict[str, tuple[int, str, str, CanonicalEntityKey]] = {}
         for record in self._resolver.records:
             if record.key.entity_type != entity_type:
                 continue
-            for value in (record.display_name, record.key.primary_id, *(a.value for a in record.aliases)):
-                if value and value.casefold().startswith(needle):
-                    suggestions.append(value)
-        unique = sorted({value for value in suggestions if value}, key=str.casefold)
-        self._completer_model.setStringList(unique[:2_000])
+            if not all(_record_matches_token(record, token) for token in tokens):
+                continue
+            rank = _best_entity_autocomplete_rank_for_record(record, tokens)
+            friendly = autocomplete_friendly_label_for_record(record)
+            aggregated[record.key.label()] = (
+                int(rank),
+                friendly.casefold(),
+                friendly,
+                record.key,
+            )
+        matches = [
+            (friendly, key)
+            for _, _, friendly, key in sorted(
+                aggregated.values(),
+                key=lambda item: (item[0], item[1], item[3].primary_id),
+            )
+        ]
+        self._set_completer_matches(matches[:2_000])
+
+    def _set_completer_matches(self, matches: list[tuple[str, CanonicalEntityKey]]) -> None:
+        self._completer_model.clear()
+        for display_text, key in matches:
+            item = QStandardItem(display_text)
+            item.setData(key, Qt.ItemDataRole.UserRole)
+            self._completer_model.appendRow(item)
+
+    def _completer_key_for_text(self, text: str) -> CanonicalEntityKey | None:
+        for row in range(self._completer_model.rowCount()):
+            item = self._completer_model.item(row)
+            if item is None or item.text() != text:
+                continue
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(key, CanonicalEntityKey):
+                return key
+        return None
+
+    def _text_represents_selected_entity(self, text: str) -> bool:
+        if self._selected is None:
+            return False
+        needle = text.strip().casefold()
+        if not needle:
+            return False
+        record = self._selected
+        if needle == autocomplete_friendly_label_for_record(record).casefold():
+            return True
+        if needle == record.display_name.casefold():
+            return True
+        if needle == record.key.primary_id.casefold():
+            return True
+        return any(needle == alias.value.casefold() for alias in record.aliases)
 
     def _record_for_key(self, key: CanonicalEntityKey) -> EntityRecord | None:
         if self._repository is not None:
@@ -243,13 +306,35 @@ class EntitySelectorPanel(QWidget):
         return None
 
     def _run_search(self) -> None:
-        query = self.search_input.text().strip()
-        if not query:
+        self._commit_entity_selection(query=self.search_input.text().strip())
+
+    def _on_completer_activated(self, text: str) -> None:
+        self._committing_completer_selection = True
+        try:
+            key = self._completer_key_for_text(text)
+            self._commit_entity_selection(query=text, key=key)
+        finally:
+            self._committing_completer_selection = False
+
+    def _commit_entity_selection(
+        self,
+        *,
+        query: str | None = None,
+        key: CanonicalEntityKey | None = None,
+    ) -> None:
+        resolved_query = (query or self.search_input.text()).strip()
+        if key is not None:
+            record = self._record_for_key(key)
+            if record is not None:
+                self.disambiguation.hide()
+                self._select_entity(record)
+                return
+        if not resolved_query:
             return
         if self._repository is not None:
-            result = self._repository.search(query, self.current_entity_type())
+            result = self._repository.search(resolved_query, self.current_entity_type())
         elif self._resolver is not None:
-            result = self._resolver.search(query, self.current_entity_type())
+            result = self._resolver.search(resolved_query, self.current_entity_type())
         else:
             return
         self.disambiguation.hide()
