@@ -1,3 +1,4 @@
 -r requirements.txt
 pyinstaller==6.20.0
 pillow>=10
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

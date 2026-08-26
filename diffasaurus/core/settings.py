@@ -10,6 +10,9 @@ DEFAULT_SETTINGS = {
     "report_source": "local",
     "external_reports_path": "",
     "powershell_runtime_path": "",
+    "updates_enabled": True,
+    "managed_updates": False,
+    "update_channel": "preview",
 }
 
 
@@ -58,3 +61,16 @@ def set_powershell_runtime_path(path: Path | None) -> None:
     settings = load_settings()
     settings["powershell_runtime_path"] = str(path) if path else ""
     save_settings(settings)
+
+
+def updates_enabled() -> bool:
+    return bool(load_settings().get("updates_enabled", True))
+
+
+def managed_updates_enabled() -> bool:
+    return bool(load_settings().get("managed_updates", False))
+
+
+def update_channel() -> str:
+    channel = str(load_settings().get("update_channel", "preview") or "preview").strip().casefold()
+    return "preview" if channel == "preview" else "preview"

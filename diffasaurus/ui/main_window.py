@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QIcon
+from PyQt6.QtGui import QAction, QColor, QCloseEvent, QFont, QFontDatabase, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -67,7 +68,8 @@ from diffasaurus.core.configuration_policies.integration import (
 )
 from diffasaurus.ui.configuration_policy_presentation import build_semantic_detail_rows
 from diffasaurus.core.paths import project_root
-from diffasaurus.core.settings import get_active_reports_dir
+from diffasaurus.core.session_state import consume_pre_update_session, save_pre_update_session
+from diffasaurus.core.settings import get_active_reports_dir, managed_updates_enabled
 from diffasaurus.ui.comparison_presentation import (
     configure_comparison_detail_table,
     populate_comparison_detail_table,
@@ -82,6 +84,7 @@ from diffasaurus.ui.configuration_policy_page import ConfigurationPolicyPage
 from diffasaurus.ui.entity_index_controller import EntityIndexController
 from diffasaurus.ui.navigation_pages import (
     PAGE_CONFIGURATION_POLICIES,
+    PAGE_COUNT,
     PAGE_ENTITY_HISTORY,
     PAGE_POINT_IN_TIME,
     PAGE_RECENT_CHANGES,
@@ -90,6 +93,10 @@ from diffasaurus.ui.navigation_pages import (
 )
 from diffasaurus.ui.progress_coordinator import ProgressCoordinator
 from diffasaurus.ui.snapshot_explorer import SnapshotExplorer
+from diffasaurus.ui.macos_updater import (
+    MANAGED_UPDATES_MESSAGE,
+    create_macos_updater_service,
+)
 
 
 COLORS = {
@@ -337,8 +344,15 @@ class DiffasaurusWindow(QMainWindow):
         self._family_timer.setSingleShot(True)
         self._family_timer.setInterval(250)
         self._family_timer.timeout.connect(self._start_family_analysis)
+        self._macos_updater = create_macos_updater_service(
+            save_session_callback=self._capture_pre_update_session,
+        )
+        self._check_updates_action: QAction | None = None
+        self._update_menu = None
+        self._pending_session_restore = True
         self._build_ui()
         self._wire()
+        self._setup_macos_application_menu()
         if self._persistent_entity_index and self._entity_index_controller is not None:
             self._log_persistent_entity_index_paths(self.report_dir)
             repository = self._entity_index_controller.open_existing(self.report_dir)
@@ -1161,6 +1175,7 @@ class DiffasaurusWindow(QMainWindow):
         else:
             self._ensure_entity_index(force=True)
         self.family_changed()
+        self._restore_pre_update_session_if_needed()
         self._progress_coordinator.finish_task("history_scan", generation)
 
     def _index_failed(self, generation: int, message: str):
@@ -2085,6 +2100,60 @@ class DiffasaurusWindow(QMainWindow):
         self.thread_pool.clear()
         self.thread_pool.waitForDone(ENTITY_INDEX_SHUTDOWN_WAIT_MS)
         event.accept()
+
+    def _setup_macos_application_menu(self) -> None:
+        if sys.platform != "darwin":
+            return
+        menu_bar = self.menuBar()
+        menu_bar.setNativeMenuBar(True)
+        self._check_updates_action = QAction("Check for Updates…", self)
+        self._check_updates_action.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        self._check_updates_action.triggered.connect(self._check_for_updates)
+        self._update_menu = menu_bar.addMenu("Application")
+        self._update_menu.addAction(self._check_updates_action)
+        self._refresh_macos_update_menu()
+
+    def _refresh_macos_update_menu(self) -> None:
+        if self._check_updates_action is None:
+            return
+        visible = sys.platform == "darwin" and self._macos_updater.is_available()
+        enabled = visible and self._macos_updater.can_check_for_updates()
+        self._check_updates_action.setVisible(visible)
+        self._check_updates_action.setEnabled(enabled)
+
+    def _check_for_updates(self) -> None:
+        ok, message = self._macos_updater.check_for_updates()
+        if not ok and message:
+            QMessageBox.information(self, "Diffasaurus updates", message)
+
+    def _capture_pre_update_session(self) -> None:
+        page = self.stack.currentIndex()
+        family = self.family_combo.currentText() if self.family_combo.count() else ""
+        save_pre_update_session(
+            page=page,
+            report_family=family,
+            snapshot_path=self.snapshot_explorer.selected_snapshot_path_str(),
+            explorer_view=self.snapshot_explorer.current_view_mode(),
+        )
+
+    def _restore_pre_update_session_if_needed(self) -> None:
+        if not self._pending_session_restore:
+            return
+        self._pending_session_restore = False
+        state = consume_pre_update_session()
+        if state is None:
+            return
+        if 0 <= state.page < PAGE_COUNT:
+            self.show_page(state.page)
+        if state.report_family and state.report_family in self.families:
+            self.family_combo.blockSignals(True)
+            self.family_combo.setCurrentText(state.report_family)
+            self.family_combo.blockSignals(False)
+            self.family_changed()
+        if state.snapshot_path:
+            self.snapshot_explorer.restore_snapshot_path(state.snapshot_path)
+        if state.page == PAGE_SNAPSHOT_EXPLORER:
+            self.snapshot_explorer.restore_view_mode(state.explorer_view)
 
     def open_report_runner(self):
         dialog = RunScriptsDialog(self)

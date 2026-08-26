@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from diffasaurus.core.settings import load_settings, save_settings
+from diffasaurus.core.settings import load_settings, managed_updates_enabled, save_settings
+from diffasaurus.ui.macos_updater import MANAGED_UPDATES_MESSAGE
 
 
 class ReportSourceSettingsDialog(QDialog):
@@ -68,6 +69,12 @@ class ReportSourceSettingsDialog(QDialog):
             self.external.setChecked(True)
         else:
             self.local.setChecked(True)
+
+        if managed_updates_enabled():
+            managed = QLabel(MANAGED_UPDATES_MESSAGE)
+            managed.setWordWrap(True)
+            managed.setStyleSheet("color:#8295a8;")
+            layout.insertWidget(layout.count() - 1, managed)
 
     def browse(self):
         selected = QFileDialog.getExistingDirectory(
