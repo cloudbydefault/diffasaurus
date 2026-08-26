@@ -2,28 +2,36 @@
 
 ## Unreleased
 
-### Added
+## 0.2.0-preview.4
 
-- A snapshot explorer with sortable table and adaptive dashboard views for
-  every dated CSV.
-- Background CSV loading and report-aware dashboards for identities, activity,
-  authentication, groups, group memberships, roles, devices, iOS, Autopilot,
-  Intune apps, access packages, and Exchange shared mailboxes.
-- A generic data-quality dashboard for report schemas without a specialized
-  builder.
-- Improved Excel-style multi-column filtering with lazy background value
-  scans, column/value search, blank handling, and combined filters.
-- Debounced smart search plus an all-columns search mode.
-- Separate background-scanned counts for Diffasaurus-isolated modules and
-  modules installed in normal PowerShell user or machine locations.
-- An installed-module inventory with explicit, background copying of one or
-  all installed module versions into a runtime's independent environment.
+This private preview improves Recent Changes reliability and adds reusable
+Snapshot Explorer dashboards.
 
-### Fixed
+### Recent Changes reliability
 
-- The runtime manager no longer reports `0` in a misleading “Private modules”
-  column when a system PowerShell has native modules installed. The interface
-  now clearly distinguishes **Isolated** from **Installed** modules.
+- Fixed a reproducible macOS process abort when typing in expanded Recent
+  Changes detail search.
+- Corrected semantic/comparison detail renderer routing.
+- Added safe batched table updates and 150 ms debounced detail searching.
+
+### User-created dashboards
+
+- Snapshot Explorer now separates **Built-in** and **My dashboards**.
+- Save a filtered, searched, and sorted Table view as a reusable dashboard
+  (**Save as dashboard**).
+- Create, edit, duplicate, and delete custom dashboards scoped by report
+  family.
+- Column-name-based definitions survive normal column reordering; incompatible
+  dashboards are marked **Needs attention** and do not partially apply.
+- Import/export dashboard definitions, export dashboard results to CSV, and
+  reset custom dashboards without touching built-ins.
+- Table and Dashboard toolbars are split for clearer workflow; custom dashboard
+  cards use an opaque action menu.
+
+### Packaging notes
+
+- macOS and Windows packages remain preview builds without production signing
+  or notarization.
 
 ## 0.2.0-preview.3
 
