@@ -23,6 +23,24 @@ icon_path = (
 )
 signing_identity = os.environ.get("DIFFASAURUS_SIGN_IDENTITY")
 entitlements = root / "packaging" / "macos" / "entitlements.plist"
+preview_feed_url = os.environ.get(
+    "DIFFASAURUS_SPARKLE_FEED_URL",
+    "https://cloudbydefault.github.io/diffasaurus/appcast-preview.xml",
+)
+sparkle_public_ed_key = os.environ.get("DIFFASAURUS_SPARKLE_PUBLIC_ED_KEY", "").strip()
+release_build = os.environ.get("DIFFASAURUS_RELEASE_BUILD", "").strip() == "1"
+if release_build and not sparkle_public_ed_key:
+    raise SystemExit(
+        "Release build requires DIFFASAURUS_SPARKLE_PUBLIC_ED_KEY for Sparkle EdDSA verification."
+    )
+hiddenimports = []
+if sys.platform == "darwin":
+    hiddenimports.extend(
+        [
+            "objc",
+            "Foundation",
+        ]
+    )
 datas = [
     (str(root / "psscripts"), "psscripts"),
     (str(root / "assets"), "assets"),
@@ -33,7 +51,7 @@ analysis = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
@@ -80,5 +98,10 @@ if sys.platform == "darwin":
             "LSMinimumSystemVersion": "12.0",
             "NSHighResolutionCapable": True,
             "NSPrincipalClass": "NSApplication",
+            "SUFeedURL": preview_feed_url,
+            "SUPublicEDKey": sparkle_public_ed_key,
+            "SUEnableAutomaticChecks": False,
+            "SUAutomaticallyUpdate": False,
+            "SUVerifyUpdateBeforeExtraction": True,
         },
     )

@@ -497,6 +497,35 @@ class SnapshotExplorer(QWidget):
         self.toolbar_stack.setCurrentIndex(index)
         self._update_dashboard_actions_enabled()
 
+    def current_view_mode(self) -> str:
+        return "dashboard" if self.views.currentIndex() == 1 else "table"
+
+    def selected_snapshot_path_str(self) -> str:
+        snapshot = self.snapshot_combo.currentData()
+        if isinstance(snapshot, ReportSnapshot):
+            return str(snapshot.path)
+        if self.loaded_path is not None:
+            return str(self.loaded_path)
+        return ""
+
+    def restore_view_mode(self, mode: str) -> None:
+        if mode == "dashboard" and not is_configuration_policy_family(self._family):
+            self.show_view(1)
+        else:
+            self.show_view(0)
+
+    def restore_snapshot_path(self, path_str: str) -> bool:
+        if not path_str:
+            return False
+        target = Path(path_str)
+        for index in range(self.snapshot_combo.count()):
+            snapshot = self.snapshot_combo.itemData(index)
+            if isinstance(snapshot, ReportSnapshot) and snapshot.path == target:
+                self.snapshot_combo.setCurrentIndex(index)
+                self.load_selected()
+                return True
+        return False
+
     def load_selected(self, _index: int | None = None):
         snapshot = self.snapshot_combo.currentData()
         if not isinstance(snapshot, ReportSnapshot):
