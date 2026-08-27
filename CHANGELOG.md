@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.2.0-preview.5
+
+This preview is the first public macOS build with in-app updates. Preview 4
+users should install Preview 5 manually; Preview 5 can then update to Preview 6
+and later through the built-in updater.
+
+### macOS self-update
+
+- Sparkle-based in-app update bootstrap for preview channel builds.
+- Native **Check for Updates…** menu action.
+- EdDSA-verified update archives before extraction.
+- Session restore across update and relaunch.
+
+### Entity search and selection
+
+- Search entities by any name token, not just the start of the display name.
+- Multi-token queries such as `smith john` match in any order.
+- Autocomplete selection commits immediately in Entity History and Point-in-Time
+  without an extra Enter key.
+- Autocomplete shows one row per account, even when several aliases match the
+  same query.
+
+### Packaging notes
+
+- macOS preview builds remain ad-hoc signed unless a Developer ID identity is
+  supplied at build time. They are not notarized.
+
 ## 0.2.0-preview.4
 
 This private preview improves Recent Changes reliability and adds reusable
