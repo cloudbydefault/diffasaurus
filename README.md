@@ -9,6 +9,20 @@ helps you chart tenant evolution, spot movement, compare snapshots, trace
 entities, and reconstruct what was known at a chosen date. Exploring history is
 read-only; it does not modify your tenant or require a cloud backend.
 
+## Current preview
+
+**Diffasaurus 0.2.0 Preview 5** is the current preview release.
+
+**macOS (Apple silicon / ARM64):** download the DMG from
+[GitHub Releases](https://github.com/cloudbydefault/diffasaurus/releases).
+Preview builds are ad-hoc signed and not notarized unless built with a Developer
+ID identity.
+
+Preview 4 users should install Preview 5 manually. Preview 5 introduces the
+built-in macOS updater; later preview releases can be installed from
+**Diffasaurus → Check for Updates…** once the preview update feed is published
+for your installation.
+
 ## How Diffasaurus gets its history
 
 Diffasaurus is an investigation engine, not a historical Microsoft 365 API. It
@@ -53,7 +67,11 @@ and [Azure Automation collectors](collectors/azure-automation/README.md).
 - Recent-change detection across report families
 - Snapshot comparison with field-level diffs
 - Entity history for users, devices, and shared mailboxes
+- Fast, flexible entity search across display names and aliases
 - Point-in-Time reconstruction at a selected date
+- Snapshot Explorer dashboards, including user-created **My dashboards**
+- Filtered and selected CSV export from Snapshot Explorer
+- macOS in-app update support (Sparkle preview channel)
 - Semantic Intune Configuration Policy history, settings, assignments, and diffs
 - Local, read-only analysis—no database server required
 
@@ -74,7 +92,12 @@ and [Azure Automation collectors](collectors/azure-automation/README.md).
 
 **Recent Changes** — Movement across supported families for 24 hours through 30 days; summary cards and per-family detail, with links into Compare.
 
-**Entity History** — Search a user, device, or shared mailbox; review changes across snapshots; open **View at date** for Point-in-Time.
+**Entity History** — Search users, devices, or shared mailboxes by any name
+token—not only the start of the display name. UPNs, SMTP addresses, device
+names, serial numbers, and historical aliases remain searchable; multiple tokens
+can be entered in any order. Autocomplete shows one result per canonical entity;
+selecting a suggestion loads the entity immediately. Review changes across
+snapshots and open **View at date** for Point-in-Time.
 
 **Point-in-Time** — See below.
 
@@ -82,7 +105,11 @@ and [Azure Automation collectors](collectors/azure-automation/README.md).
 
 **Compare snapshots** — Added, removed, changed, and stable rows between two dated exports, with CSV export.
 
-**Snapshot explorer** — Open any snapshot as a sortable table (search and multi-column filters) or an interactive dashboard; large files load in the background.
+**Snapshot explorer** — Open any snapshot as a sortable, searchable table with
+multi-column filters; large files load in the background. **Export view** and
+**Export selection** write the current filtered table or selected rows to CSV.
+Built-in dashboards and **My dashboards** save reusable filtered views; import
+and export dashboard definitions where supported.
 
 **Run health** — Weekday collection evidence for the last ten business days; a missing CSV means no observed output, not proof about an external scheduler.
 
@@ -102,11 +129,13 @@ automatically upgraded or trusted. Investigation is read-only; no live Graph cal
 
 ## Point-in-Time
 
-Select an entity and target date, then **Reconstruct**. Diffasaurus uses the
-latest snapshot **at or before** that moment for each report family—never future
-exports. Missing coverage is shown as missing evidence, not as a confirmed zero.
-**Show source details** lists the CSV path, capture time, gap to your target, raw
-fields, and reconstruction diagnostics.
+Select an entity and target date, then **Reconstruct**. Selecting an
+autocomplete result commits the entity immediately—no extra Enter key is
+required before reconstruction. Diffasaurus uses the latest snapshot **at or
+before** that moment for each report family—never future exports. Missing
+coverage is shown as missing evidence, not as a confirmed zero. **Show source
+details** lists the CSV path, capture time, gap to your target, raw fields, and
+reconstruction diagnostics.
 
 **Users** receive an identity card with identity and organization; authentication
 and activity; **managed devices** (compliance, hardware, ownership, expandable
@@ -115,6 +144,17 @@ roles; groups; and access packages. macOS, iOS, Cloud PCs, and virtual machines
 identified in managed-device exports are not treated as missing Autopilot
 registrations. Devices and shared mailboxes use layouts appropriate to those
 entity types.
+
+## macOS updates
+
+Packaged macOS builds include Sparkle for the preview update channel. Use
+**Diffasaurus → Check for Updates…** to look for a newer preview release.
+Update archives are EdDSA-verified before extraction. When an update installs,
+Diffasaurus quits, replaces itself, relaunches, and restores minimal session
+state. Settings, report sources, dashboards, and other data live outside the
+`.app` bundle and remain intact. Managed deployments can disable self-update in
+settings. See [macOS updater](docs/macos-updater.md) for release and feed
+details.
 
 ## How it works
 
@@ -170,6 +210,10 @@ Windows: `./scripts/build_windows.ps1` → `release/Diffasaurus-<version>-Window
 
 macOS: `scripts/build_macos.sh` → `release/Diffasaurus-<version>-macOS-arm64.dmg`
 
+Updater-enabled macOS release builds require the Sparkle public key at build
+time (`DIFFASAURUS_SPARKLE_PUBLIC_ED_KEY`); see
+[macOS updater](docs/macos-updater.md).
+
 Packaged apps store settings, caches, reports, and runtimes under the platform
 application data location—not inside the bundle. Optional signing:
 `DIFFASAURUS_SIGN_IDENTITY` and `DIFFASAURUS_NOTARY_PROFILE` for notarized macOS
@@ -184,8 +228,9 @@ but is not a complete safety net—review before pushing.
 
 ## Project status
 
-Feature-complete for its current scope. Further work focuses on fixes, report
-compatibility, reliability, and maintenance.
+Diffasaurus is currently distributed as preview software. Core historical
+investigation workflows are implemented; development continues around
+reliability, report coverage, packaging, and user experience.
 
 ## Test
 
